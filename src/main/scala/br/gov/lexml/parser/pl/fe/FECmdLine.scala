@@ -205,10 +205,9 @@ class FECmdLineOptionParser extends scopt.OptionParser[CmdLineOpts]("parser") {
           }
         }.text("Mostra os parâmetros usados no parse e sai sem executar o parse"),
         opt[String]('t',"tipo-norma").action { cmdParse { case (n,cmd) =>
-            cmd changeMetadado {
+            cmd.changeMetadado {
               _.copy(tipoNorma = Some(n))
-            }
-            cmd.changeOverrides(_.copy(overrideUrnFragTipoNorma = Some(n)))
+            }.changeOverrides(_.copy(overrideUrnFragTipoNorma = Some(n)))
           }
         }.text("tipo de norma, na sintaxe usada na URN do LexML, eg. 'lei'"),
         opt[String]('a',"autoridade"). action { cmdParse { case (n,cmd) =>
