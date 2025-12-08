@@ -508,7 +508,7 @@ object FECmdLine {
   def dumpProfile(p : DocumentProfile): Unit = {
     import p._
     println(s"Profile localidade: ${urnFragLocalidade.getOrElse("-")}, autoridade: $urnFragAutoridade, tipoNorma: $urnFragTipoNorma")
-    println(s"   --prof-regex-preambulo '${regexPosEpigrafe.mkString("%")}'")
+    println(s"   --prof-regex-preambulo '${regexPreambulo.mkString("%")}'")
     println(s"   --prof-regex-epigrafe '${regexEpigrafe1.mkString("%")}'")
     println(s"   --prof-regex-epigrafe-continuacao '${regexEpigrafe.mkString("%")}'")
     println(s"   --prof-regex-pos-epigrafe '${regexPosEpigrafe.mkString("%")}'")      
