@@ -176,26 +176,32 @@ case class Metadado(profile : DocumentProfile, localidade : Option[String] = Non
 		case None => throw new RuntimeException("%s_0_0_0_0_leitura" format profile.subTipoNorma.getOrElse(""))
 	}
 	def changeId(f : Id => Id): Metadado = copy(id = Some(f(id.getOrElse(Id()))))
-	def epigrafePadrao : String = {	  
-	  val t = id match { 
+	def epigrafePadrao : String = {
+	  val t = id match {
 	    case None => profile.epigrafeSemIdTemplate
 	    case Some(sid) =>
 	      var tp = profile.epigrafeTemplate
 	      tp = tp.add("numeroComComplemento",sid.numeroComplementoRepr)
 	      tp = sid.anoOuData match {
-	        case Left(ano) => 
+	        case Left(ano) =>
 	          tp.add("ano",ano)
 	            .add("dataExtenso",ano)
 	        case Right(dt) =>
 	          tp.add("ano",dt.ano)
-	            .add("dataExtenso",dt.extenso.toUpperCase)	          
+	            .add("dataExtenso",dt.extenso.toUpperCase)
 	      }
         tp = tp.add("epigrafeRepr",sid.epigrafeRepr)
         tp
 	  }
-    t.add("epigrafeHead",profile.epigrafeHead)
-     .add("epigrafeTail",profile.epigrafeTail)     
+    val rendered = t.add("epigrafeHead",profile.epigrafeHead)
+     .add("epigrafeTail",profile.epigrafeTail)
      .render()
+
+    // Apply Fixer replacement when ID is available to handle placeholder constants
+    id match {
+      case Some(sid) => Fixer.replace(rendered, Fixer.makeRepMap(sid))
+      case None => rendered
+    }
 	}
 }
 

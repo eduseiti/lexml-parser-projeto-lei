@@ -56,8 +56,21 @@ case class ProjetoLei(
       <articulacao>{ NodeSeq fromSeq (articulacao.flatMap(_.toNodeSeq)) }</articulacao>
     </projetolei>
 
-  lazy val remakeEpigrafe: ProjetoLei = {    
-    this.copy(epigrafe = Paragraph(Text(metadado.epigrafePadrao)))
+  lazy val remakeEpigrafe: ProjetoLei = {
+    // Try to parse ID from original epigrafe if metadata doesn't have one
+    val updatedMetadado = metadado.id match {
+      case None =>
+        ProjetoLei.parseEpigrafeId(epigrafe) match {
+          case Some(parsedId) => metadado.copy(id = Some(parsedId))
+          case None => metadado
+        }
+      case Some(_) => metadado
+    }
+
+    this.copy(
+      metadado = updatedMetadado,
+      epigrafe = Paragraph(Text(updatedMetadado.epigrafePadrao))
+    )
   }
   lazy val dispositivoCount = {
     def count(b: Block): Int = b match {
@@ -442,4 +455,76 @@ object ProjetoLei {
 
   def existsAnyThatP[R](l: List[Block], f: PartialFunction[Block, Boolean]): Boolean =
     firstThat(l, _.searchFirst(f.lift(_).getOrElse(false))).isDefined
+
+  /**
+   * Attempts to parse the ID (number and date) from the original epigrafe text.
+   * This is used when metadata doesn't provide an ID.
+   */
+  def parseEpigrafeId(epigrafeBlock: Block): Option[metadado.Id] = {
+    import metadado.{Id, Data}
+
+    epigrafeBlock match {
+      case p: Paragraph =>
+        val text = normalizer.normalize(p.text)
+
+        // Debug: print what text we're trying to parse
+        System.err.println(s"[DEBUG parseEpigrafeId] Original text: '${p.text}'")
+        System.err.println(s"[DEBUG parseEpigrafeId] Normalized text: '$text'")
+
+        // Pattern to extract number and date
+        // Matches patterns like: "Nº 1.234, de 8 de dezembro de 2025" or "nº 123, de 2025"
+        val numeroDataPattern = """.*[Nn][oº°˚]\s*([0-9.,]+).*?de\s+(.+)""".r
+
+        text match {
+          case numeroDataPattern(numeroStr, dataStr) =>
+            System.err.println(s"[DEBUG parseEpigrafeId] Regex matched! Number: '$numeroStr', Date: '$dataStr'")
+            try {
+              // Remove formatting from number (dots and commas)
+              val num = numeroStr.replaceAll("[.,\\s]", "").toInt
+              System.err.println(s"[DEBUG parseEpigrafeId] Parsed number: $num")
+
+              // Map of month names (Portuguese)
+              val mesesMap = Map(
+                "janeiro" -> 1, "fevereiro" -> 2, "marco" -> 3, "março" -> 3,
+                "abril" -> 4, "maio" -> 5, "junho" -> 6, "julho" -> 7,
+                "agosto" -> 8, "setembro" -> 9, "outubro" -> 10,
+                "novembro" -> 11, "dezembro" -> 12
+              )
+
+              // Try to parse extensive date format: "8 de dezembro de 2025"
+              val dataExtensaPattern = """(\d+)\s+de\s+(\w+)\s+de\s+(\d{4})""".r
+              // Try to parse just year: "2025"
+              val anoPattern = """^\s*(\d{4})\s*$""".r
+
+              val anoOuData: Option[Either[Int, Data]] = dataStr.trim.toLowerCase match {
+                case dataExtensaPattern(dia, mes, ano) =>
+                  System.err.println(s"[DEBUG parseEpigrafeId] Matched extensive date: dia=$dia, mes=$mes, ano=$ano")
+                  mesesMap.get(mes).map(m => Right(Data(ano.toInt, m, dia.toInt)))
+                case anoPattern(ano) =>
+                  System.err.println(s"[DEBUG parseEpigrafeId] Matched year only: ano=$ano")
+                  Some(Left(ano.toInt))
+                case _ =>
+                  System.err.println(s"[DEBUG parseEpigrafeId] Date pattern did not match: '$dataStr'")
+                  None
+              }
+
+              anoOuData.map { ad =>
+                System.err.println(s"[DEBUG parseEpigrafeId] Successfully parsed ID: num=$num, date=$ad")
+                Id(num = num, anoOuData = ad)
+              }
+            } catch {
+              case ex: NumberFormatException =>
+                System.err.println(s"[DEBUG parseEpigrafeId] NumberFormatException: ${ex.getMessage}")
+                None
+              case ex: Exception =>
+                System.err.println(s"[DEBUG parseEpigrafeId] Exception: ${ex.getMessage}")
+                None
+            }
+          case _ =>
+            System.err.println(s"[DEBUG parseEpigrafeId] Regex did NOT match!")
+            None
+        }
+      case _ => None
+    }
+  }
 }
