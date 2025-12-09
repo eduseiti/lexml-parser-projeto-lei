@@ -185,9 +185,25 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
 
 
   private def spanEpigrafe(bl: List[Block]): Option[(List[Block], Block, List[Block])] = {
+
+    // System.err.println(s"[DEBUG spanEpigrafe] block: '${bl}'")
+    // System.err.println(s"[DEBUG spanEpigrafe] regexEpigrafe1: '${profile.regexEpigrafe1}'")
+
     val (pre, bl1) = bl.span(doesNotMatchAnyOf(profile.regexEpigrafe1))
+
+    // System.err.println(s"[DEBUG spanEpigrafe] pre: '${pre}'")
+    // System.err.println(s"[DEBUG spanEpigrafe] bl1: '${bl1}'")
+
     val pre2 = pre.filter(!isEmptyPar(_))
+
+    // System.err.println(s"[DEBUG spanEpigrafe] pre2: '${pre2}'")
+
     val (epi, pos) = bl1.span(matchesOneOf(profile.regexEpigrafe ++ profile.regexEpigrafe1))
+
+    // System.err.println(s"[DEBUG spanEpigrafe] epi: '${epi}'")
+    // System.err.println(s"[DEBUG spanEpigrafe] pos: '${pos}'")
+
+
     val pos2 = pos.dropWhile(b => matchesOneOf(profile.regexPosEpigrafe)(b) || isEmptyPar(b))
     val epi2 = epi collect { case p: Paragraph => p }
     epi2 match {
@@ -211,9 +227,22 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
       case x => false
     }
     val (prePreambulo, preAmbuloAndPos) = bl.span(x => !isPreambulo(x) && !isArticulacao(x))
+
+    // System.err.println(s"[DEBUG reconhecePreambulo] prePreambulo: '${prePreambulo}'")
+    // System.err.println(s"[DEBUG reconhecePreambulo] preAmbuloAndPos: '${preAmbuloAndPos}'")
+
     val (preAmbulo1, posPreambulo) = preAmbuloAndPos.span(!isArticulacao(_))
-    val preAmbulo = preAmbulo1.filter({ case p: Paragraph => !isPosEpigrafe(p); case _ => true })
-    (prePreambulo, preAmbulo.collect { case p: Paragraph => p }, posPreambulo)
+
+    // System.err.println(s"\n[DEBUG reconhecePreambulo] preAmbulo1: '${preAmbulo1}'")
+    // System.err.println(s"\n[DEBUG reconhecePreambulo] posPreambulo: '${posPreambulo}'")
+
+    // val preAmbulo = preAmbulo1.filter({ case p: Paragraph => !isPosEpigrafe(p); case _ => true })
+    val (preAmbulo, posPreambulo1) = preAmbulo1.span(!isPosEpigrafe(_))
+
+    System.err.println(s"\n[DEBUG reconhecePreambulo] preAmbulo: '${preAmbulo}'")
+    System.err.println(s"\n[DEBUG reconhecePreambulo] posPreambulo1 ++ posPreambulo: '${posPreambulo1 ++ posPreambulo}'")
+
+    (prePreambulo, preAmbulo.collect { case p: Paragraph => p }, posPreambulo1 ++ posPreambulo)
   }
 
 
@@ -305,6 +334,10 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
       
       val ms = Marcadores(profile)
       val elementos = ms.span(posPreambulo)
+
+      System.err.println(s"\n[DEBUG parseArticulacao] elementos: '${elementos}'")
+      
+
       if (!elementos.contains(Articulacao)) {
         throw ParseException(ArticulacaoNaoIdentificada)
       }
