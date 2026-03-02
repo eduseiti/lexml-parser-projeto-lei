@@ -7,7 +7,7 @@
 ### Key Information
 - **Language**: Scala 2.13.12
 - **Build Tool**: Maven
-- **Current Version**: 1.14.19-SNAPSHOT
+- **Current Version**: 1.15.0
 - **License**: GPLv2
 - **Java Version**: 11
 - **Main Branch**: master

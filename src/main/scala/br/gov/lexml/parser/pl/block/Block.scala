@@ -505,17 +505,29 @@ object Block extends Block {
   def spanNivel(nivel: Int, bl: List[Block]): (List[Block], List[Block]) = {
     def proxSpan(l: List[Block]): (List[Block], List[Block]) = {
       val (omissis, posOmissis) = l.span(_.isInstanceOf[Omissis])
-      val (nivelSuperior, resto) = posOmissis.span({
+      val (nivelSuperior, afterSuperior) = posOmissis.span({
         case d: Dispositivo => d.rotulo.nivel > nivel
         case _ => false
       })
       if (nivelSuperior.nonEmpty) {
-        val (l1, l2) = proxSpan(resto)
+        val (l1, l2) = proxSpan(afterSuperior)
         (omissis ++ nivelSuperior ++ l1, l2)
-      } else if (nivel == niveis.artigo) {
-        (omissis, posOmissis)
       } else {
-        (Nil, l)
+        // When no immediately-superior dispositivos are found, check if a Table
+        // is blocking the view. Tables are transparent to spanning: we skip past
+        // them so sub-dispositivos after the table are still grouped with the
+        // parent dispositivo correctly. The table itself is NOT added to
+        // nivelSuperior — it stays at the outer (articulacao) level.
+        afterSuperior match {
+          case (t: Table) :: restAfterTable =>
+            val (l1, l2) = proxSpan(restAfterTable)
+            if (l1.nonEmpty) (omissis ++ l1, t :: l2)
+            else if (nivel == niveis.artigo) (omissis, posOmissis)
+            else (Nil, l)
+          case _ =>
+            if (nivel == niveis.artigo) (omissis, posOmissis)
+            else (Nil, l)
+        }
       }
     }
 

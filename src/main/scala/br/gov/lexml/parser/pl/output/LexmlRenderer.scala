@@ -186,7 +186,7 @@ object LexmlRenderer {
   def renderId(path: List[Rotulo]): String = path.reverse.map(renderId).mkString("", "_", "")
 
   def renderBlocks(bl: Seq[Block], idPai: String): NodeSeq =
-    NodeSeq fromSeq (bl.foldLeft((List[Node](), 0))(render(idPai)))._1.reverse
+    NodeSeq fromSeq (bl.foldLeft((List[Node](), 0, 0))(render(idPai)))._1.reverse
 
   /*def formatBlocksAlteracao(nl : List[Node]) : List[Node] = {
 		def addAttribute(name : String, value : String) = (n : Node) => 
@@ -240,8 +240,8 @@ object LexmlRenderer {
     case _ => None
   })
 
-  def render(idPai: String): ((List[Node], Int), Block) => (List[Node], Int) = {
-    case ((nl, omissisCount), b) => {
+  def render(idPai: String): ((List[Node], Int, Int), Block) => (List[Node], Int, Int) = {
+    case ((nl, omissisCount, tableCount), b) => {
       val el = b match {
         case d: Dispositivo =>
           val xml = rename(elemLabel(d.rotulo), addXlinkHref(d.id)(
@@ -288,10 +288,14 @@ object LexmlRenderer {
                        fechaAspas={ if (p.abreAspas) { "s" } else { null } } 
                        notaAlteracao={ p.notaAlteracao.map(_.toUpperCase).orNull } > */
           <p>{ NodeSeq fromSeq p.nodes }</p>)
-        case Table(elem) => List(elem)
+        case Table(elem) =>
+          // LexML schema mandates a required id attribute (idreq) on <table>
+          val tableId = idPai + "tab" + (tableCount + 1)
+          List(elem % new UnprefixedAttribute("id", tableId, Null))
         case _ => List[Node]()
       }
-      ((el ++ nl).toList, omissisCount + (b match { case _: Omissis => 1; case _ => 0 }))
+      val newTableCount = tableCount + (b match { case _: Table => 1; case _ => 0 })
+      ((el ++ nl).toList, omissisCount + (b match { case _: Omissis => 1; case _ => 0 }), newTableCount)
     }
   }
 

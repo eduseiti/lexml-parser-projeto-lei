@@ -235,11 +235,6 @@ class Validation {
     r
   }
 
-  private val semTabelasPorEnquanto: ValidationRule[(Option[Block], Block)] = {
-    case (Some(d: Dispositivo), _: Table) => Set(ElementoNaoSuportado("tabela", Some(Path(d.path).txt)))
-    case (_, _: Table) => Set(ElementoNaoSuportado("tabela"))
-  }
-
   private val noTopoSoDispositivos: ValidationRule[(Option[Block], Block)] = {
     case (None, p: Paragraph) => {
       Set(ElementoArticulacaoNaoReconhecido("", "Text Paragraph: " + p.text))
@@ -524,7 +519,7 @@ class Validation {
       conectivosSoNaPenultimaPosicao*/),
     paraTodoParagrafo(naoPodeHaveOlLi),
     paraTodaAlteracao(somenteOmissisOuDispositivoEmAlteracao),
-    paraTodoPaiOpcional_e_Filho(omissisSoEmAlteracao, semTabelasPorEnquanto, noTopoSoDispositivos))(tcAny)
+    paraTodoPaiOpcional_e_Filho(omissisSoEmAlteracao, noTopoSoDispositivos))(tcAny)
 
   def validaEstrutura(bl: List[Block]): Set[ParseProblem] =
     regras.lift(bl).getOrElse(es)

@@ -2,6 +2,7 @@ package br.gov.lexml.parser.pl.docx
 
 import javax.xml.stream.XMLInputFactory
 import br.gov.lexml.parser.pl.misc.XMLStreamUtils._
+import br.gov.lexml.parser.pl.misc.{BodyItem, ParItem, TblItem}
 
 import scala.annotation.tailrec
 import br.gov.lexml.parser.pl.misc.CollectionUtils._
@@ -38,7 +39,7 @@ object DOCXReader {
 
     override def toString : String = {
       val head = if(style != emptyStyle) { style.toString } else ""
-      "〈" + head + text + "〉"
+      "〈" + head + text + "〉"
     }
   }
 
@@ -159,7 +160,7 @@ object DOCXReader {
             e.attributes.get((XElem.wNs,"val")) match {
               case Some("superscript") => ctx.leave(Some(s => s.copy(superscript = true)))
               case Some("subscript") => ctx.leave(Some(s => s.copy(subscript = true)))
-              case x => sys.error(s"Unexpcted vertAlign value: $x")
+              case _ => ctx.leave()
             }
           case _ => ctx.leave()
         }
@@ -199,6 +200,100 @@ object DOCXReader {
     segs5
   }
 
+  // ── Table conversion ────────────────────────────────────────────────────────
+
+  /**
+   * Convert a &lt;w:tbl&gt; event sequence into an XHTML &lt;table&gt; element.
+   *
+   * Supported:
+   *   - Multiple rows and cells
+   *   - colspan via &lt;w:gridSpan w:val="N"/&gt;
+   *   - Cell paragraph content reuses collectText
+   *   - Vertical-merge continuation cells are dropped (Phase 2 adds rowspan)
+   *
+   * The generated &lt;table&gt; has no id attribute — LexmlRenderer adds it.
+   */
+  private def convertTable(tblEvents: Seq[XMLEvent]): scala.xml.Elem = {
+    import scala.xml.{Elem => ScalaElem, MetaData, Node, Null => XmlNull,
+                      Text, TopScope, UnprefixedAttribute}
+    import scala.jdk.CollectionConverters._
+
+    /** Return the value of attrLocalName on the first StartElement matching
+     *  elemLabel within evs, or None. */
+    def firstAttr(evs: Iterable[XMLEvent], elemLabel: String, attrLocalName: String): Option[String] =
+      evs.collectFirst {
+        case se: StartElement if se.getName.getLocalPart == elemLabel =>
+          se.getAttributes.asScala
+            .collect { case a: Attribute => a }
+            .find(_.getName.getLocalPart == attrLocalName)
+            .map(_.getValue)
+      }.flatten
+
+    /** True when the cell is a vMerge continuation (should be skipped). */
+    def isVMergeContinuation(tcPrEvs: Iterable[XMLEvent]): Boolean =
+      tcPrEvs.exists {
+        case se: StartElement if se.getName.getLocalPart == "vMerge" =>
+          val valOpt = se.getAttributes.asScala
+            .collect { case a: Attribute => a }
+            .find(_.getName.getLocalPart == "val")
+            .map(_.getValue)
+          // no val attribute, or any value other than "restart" = continuation
+          valOpt.forall(_ != "restart")
+        case _ => false
+      }
+
+    val rowEventSeqs = collectElems(XElem.wNs, "tr")(tblEvents)
+
+    val trElems: Seq[ScalaElem] = rowEventSeqs.flatMap { rowEvs =>
+
+      val cellEventSeqs = collectElems(XElem.wNs, "tc")(rowEvs)
+
+      val tdElems: Seq[ScalaElem] = cellEventSeqs.flatMap { cellEvs =>
+
+        val tcPrEvs: Iterable[XMLEvent] =
+          collectElems(XElem.wNs, "tcPr")(cellEvs).headOption.getOrElse(Seq.empty)
+
+        if (isVMergeContinuation(tcPrEvs)) {
+          // Phase 1: drop vertical-merge continuation cells
+          None
+        } else {
+
+          val colspan: Int =
+            firstAttr(tcPrEvs, "gridSpan", "val").flatMap(_.toIntOption).getOrElse(1)
+
+          // Collect all <w:p> inside the cell; concatenate their inline content
+          val parContents: Seq[Seq[Node]] =
+            collectElems(XElem.wNs, "p")(cellEvs)
+              .map(pEvs => collectText(pEvs).flatMap(_.toXML).toSeq)
+              .filter(_.nonEmpty)
+              .toSeq
+
+          val cellNodes: Seq[Node] = parContents match {
+            case Seq()     => Seq.empty
+            case Seq(only) => only
+            // Multiple paragraphs in a cell: separate with a space
+            case parts     => parts.reduce((a, b) => a ++ Seq(Text(" ")) ++ b)
+          }
+
+          val colspanAttr: MetaData =
+            if (colspan > 1) new UnprefixedAttribute("colspan", colspan.toString, XmlNull)
+            else XmlNull
+
+          Some(ScalaElem(null, "td", colspanAttr, TopScope, minimizeEmpty = true, cellNodes: _*))
+        }
+      }.toSeq
+
+      if (tdElems.isEmpty) None
+      else Some(ScalaElem(null, "tr", XmlNull, TopScope, minimizeEmpty = true, tdElems: _*))
+
+    }.toSeq
+
+    // id attribute is added later by LexmlRenderer
+    ScalaElem(null, "table", XmlNull, TopScope, minimizeEmpty = true, trElems: _*)
+  }
+
+  // ── Entry point ─────────────────────────────────────────────────────────────
+
   import java.io.InputStream
   import java.util.zip._
 
@@ -212,17 +307,25 @@ object DOCXReader {
       val reader = XMLInputFactory.newFactory().createXMLEventReader(zis, "UTF-8")
       import scala.jdk.CollectionConverters._
       val events = LazyList.from(reader.asScala.collect { case e: XMLEvent => e })
-      val pars = collectPars(events)
-      val textContents = pars.map(collectText)
-      val collapsed = collapseBy(textContents) {
-        case (l1, l2) if l1.isEmpty && l2.isEmpty => l1
+
+      // Collect paragraphs AND tables in document order.
+      // Previously collectPars(events) captured <w:p> at any nesting depth,
+      // including paragraphs inside table cells, causing parse failures on
+      // documents that contain tables.
+      val bodyItems: LazyList[BodyItem] = collectBodyItems(events)
+
+      val nodes: LazyList[scala.xml.Elem] = bodyItems.flatMap {
+        case ParItem(pEvs) =>
+          val segs = collectText(pEvs)
+          if (segs.isEmpty) None
+          else Some(<p>{ segs.flatMap(_.toXML) }</p>)
+
+        case TblItem(tblEvs) =>
+          Some(convertTable(tblEvs))
       }
-      val ps = collapsed.map(segs =>
-        <p>
-          {segs.flatMap(_.toXML)}
-        </p>)
-      Some(<html><body>{ps}</body></html>)
-    }  else {
+
+      Some(<html><body>{ nodes }</body></html>)
+    } else {
       None
     }
   }
