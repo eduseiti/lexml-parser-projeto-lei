@@ -521,8 +521,8 @@ object Block extends Block {
         afterSuperior match {
           case (t: Table) :: restAfterTable =>
             val (l1, l2) = proxSpan(restAfterTable)
-            if (l1.nonEmpty) (omissis ++ l1, t :: l2)
-            else if (nivel == niveis.artigo) (omissis, posOmissis)
+            if (l1.nonEmpty) (omissis ++ List(t) ++ l1, l2)
+            else if (nivel == niveis.artigo) (omissis ++ List(t), restAfterTable)
             else (Nil, l)
           case _ =>
             if (nivel == niveis.artigo) (omissis, posOmissis)
