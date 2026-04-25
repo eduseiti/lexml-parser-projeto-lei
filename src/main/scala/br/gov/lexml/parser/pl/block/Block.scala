@@ -398,7 +398,7 @@ object Block extends Block {
     (bef.reverse, aft.reverse)
   }
 
-  val reFimAlteracao: Regex = """ *(?:\((ac|nr)\))? *(?:”|“|"|'')(?: *\((ac|nr)\.?\))?$""".r
+  val reFimAlteracao: Regex = """ *(?:\((ac|nr)\))? *(?:”|“|"|'')(?: *\((ac|nr)\.?\))?(?: *\([^()]*\))?$""".r
 
   def agrupaAlteracoes(blocks: List[Block]): List[Block] =
     blocks.foldRight[List[Block]](Nil) {
