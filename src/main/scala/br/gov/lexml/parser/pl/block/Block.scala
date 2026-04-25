@@ -47,8 +47,8 @@ object HasId {
     case r : RotuloDispositivoGenerico  => s"dpg${r.num}"
     case r@RotuloParte(Left(_), _,_,_,_) => throw new IdRenderException("Parte sem número não suportado na renderização: " + r)
     case RotuloParte(Right(num), comp,unico,_,_) => "prt%d%s%s" format(num,unico.unicoChar,renderCompId(comp))
-    case RotuloLivro(Left(rot), _,_) => throw new IdRenderException(s"Livro sem número não suportado na renderização: $rot")
-    case RotuloLivro(Right(num), comp,unico) => "liv%d%s%s" format(num,unico.unicoChar, renderCompId(comp))
+    case RotuloLivro(Left(rot), _,_,_) => throw new IdRenderException(s"Livro sem número não suportado na renderização: $rot")
+    case RotuloLivro(Right(num), comp,unico,_) => "liv%d%s%s" format(num,unico.unicoChar, renderCompId(comp))
     case RotuloTitulo(num, comp,unico) => "tit%d%s%s" format(num, unico.unicoChar,renderCompId(comp))
     case RotuloSubTitulo(num, comp,unico) =>  "stt%d%s%s" format(num, unico.unicoChar,renderCompId(comp))
     case RotuloCapitulo(num, comp,unico) => "cap%d%s%s" format(num, unico.unicoChar,renderCompId(comp))
@@ -935,6 +935,24 @@ object Block extends Block {
     }._1
     blocks1.map { b =>
       b.replaceChildren(corrigeRotuloParte(b.children))
+    }.to(List)
+  }
+
+  def corrigeRotuloLivro(blocks : List[Block]) : List[Block]  = {
+    val blocks1 = blocks.foldLeft((Vector[Block](),0)) {
+      case ((blks,livroPos), d : Dispositivo) =>
+        d.rotulo match {
+          case RotuloLivro(Right(n),_,_,_) => (blks :+ d,n)
+          case r@RotuloLivro(Left(txt),_,_,_) =>
+            val num = livroPos + 1
+            val d1 = d.copy(rotulo = r.copy(num = Right(num),rotulo=Some(txt)))
+            (blks :+ d1,num)
+          case _ => (blks :+ d,livroPos)
+        }
+      case ((blks,n),x) => (blks :+ x,n)
+    }._1
+    blocks1.map { b =>
+      b.replaceChildren(corrigeRotuloLivro(b.children))
     }.to(List)
   }
 }

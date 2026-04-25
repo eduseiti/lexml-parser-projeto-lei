@@ -285,8 +285,9 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
     //printArticulacao(articulacao8,8)
     val articulacao8_1 = Block.numeraDispositivosGenericos(articulacao8)
     val articulacao8_2 = Block.corrigeRotuloParte(articulacao8_1)
+    val articulacao8_3 = Block.corrigeRotuloLivro(articulacao8_2)
     //val articulacao9 = Block.reconheceOmissisVazio(articulacao8)
-    val articulacao9 = Block.limpaParagrafosVazios(articulacao8_2)
+    val articulacao9 = Block.limpaParagrafosVazios(articulacao8_3)
     //printArticulacao(articulacao9,9)
     val articulacao9_1 = Block.pushLastOmissis(articulacao9)
     //val articulacao9 = articulacao8

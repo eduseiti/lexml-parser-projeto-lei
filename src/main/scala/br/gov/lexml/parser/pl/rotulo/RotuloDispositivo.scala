@@ -275,7 +275,12 @@ case class RotuloParte(
   val proposicao = "da" 
   val proposicaoEm = "na"
 }
-case class RotuloLivro(num: Either[String, Int], comp: Option[Int] = None, unico: Boolean = false) extends Rotulo with RotuloAgregador with NoMatterContinuity with WithEitherNumComp {
+case class RotuloLivro(
+  num: Either[String, Int],
+  comp: Option[Int] = None,
+  unico: Boolean = false,
+  rotulo : Option[String] = None) extends
+  Rotulo with RotuloAgregador with NoMatterContinuity with WithEitherNumComp {
   val nivel = niveis.livro
   override lazy val toNodeSeq = <RotuloLivro num={ num.fold(x => x, x => x.toString) } comp={ comp.mkString("", "", "") }/>
   val elemLabel = "Livro"

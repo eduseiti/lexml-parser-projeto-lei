@@ -173,7 +173,13 @@ object rotuloParser {
 		}
 
 		lazy val livro : Parser[RotuloLivro] = {
-			("livro " ~> ("\\w+"r)) ~ opt(complemento) ^^ {case ~(num,cmp) => RotuloLivro(romanOrString(num),cmp)}
+			("livro " ~> ("\\w+"r)) ~ opt(complemento) ^^ {case ~(num,cmp) =>
+				val numOrText = romanOrString(num) match {
+					case Left(s) => Left(s.toUpperCase)
+					case r => r
+				}
+				RotuloLivro(numOrText,cmp)
+			}
 		}
 
 		lazy val agregador : Parser[Rotulo] = {
