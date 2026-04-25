@@ -343,8 +343,8 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
       }
 
       val urnContexto = metadado.urnContextoLinker
-      
-      val articulacao1 = elementos(Articulacao)
+
+      val articulacao1 = elementos(Articulacao) ++ trailingTables(elementos)
       val articulacao = parseArticulacao(articulacao1,urnContexto = urnContexto)
       val possuiImagem = (preEpigrafe ++ List(epigrafe) ++ preambulo ++ articulacao1).exists({
         case p: Paragraph => (p.nodes \\ "img").nonEmpty
@@ -394,6 +394,16 @@ object ProjetoLeiParser {
   private def trimEmptyPars(bl: List[Block]): List[Block] = {
     bl.dropWhile(isEmptyPar).reverse.dropWhile(isEmptyPar).reverse
   }
+
+  // Tables that appear after a tail-marker switch (LocalData / Assinatura /
+  // Anexo / Justificacao / Legislacao) would otherwise be silently dropped,
+  // because only elementos(Articulacao) is consumed downstream. Salvage them
+  // and let parseArticulacao attach them to the last article via spanNivel.
+  private val tailMarkers: List[Marcador] =
+    List(LocalData, Justificacao, Anexo, Legislacao, Assinatura)
+
+  private def trailingTables(elementos: Map[Marcador, List[Block]]): List[Block] =
+    tailMarkers.flatMap(elementos.getOrElse(_, Nil)).collect { case t: Table => t }
 
   private def oneOf(r: List[Regex]) = (b: Block) => b match {
     case p: Paragraph => r.find(_.findFirstIn(p.text).isDefined).map(_ => p)
