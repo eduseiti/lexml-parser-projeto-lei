@@ -1,5 +1,6 @@
 package br.gov.lexml.parser.pl
 
+import scala.language.postfixOps
 import scala.util.matching.Regex
 import scala.xml.NodeSeq.seqToNodeSeq
 import scala.xml.NodeSeq
@@ -44,14 +45,37 @@ object Caracteristicas {
   val POSSUI_IMAGEM = "possui imagem"
 }
 
+/**
+ * An annex (Anexo) attached to a Norma. The LexML schema requires anexos to be
+ * standalone <LexML><Anexo>…</Anexo></LexML> documents, with the parent Norma
+ * holding only <ReferenciaAnexo URN="…"/> pointers. So each Anexo carries the
+ * URN fragment used to mint its full URN and to reference it from the Norma.
+ *
+ *  - num       — 1-based ordinal (used to build the URN suffix and stable ids)
+ *  - titulo    — first paragraph of the explicit "ANEXO I" heading, when present
+ *  - blocks    — anexo body (paragraphs, tables, optionally Dispositivos)
+ *  - implicit_ — true when promoted by the implicit-anexo heuristic (no "ANEXO" header)
+ */
+case class Anexo(
+  num: Int,
+  titulo: Option[Paragraph],
+  blocks: List[Block],
+  implicito: Boolean = false) {
+  def urnFragment: String = s"anexo$num"
+}
+
 case class ProjetoLei(
   metadado: Metadado, preEpigrafe: List[Block], epigrafe: Block, ementa: Option[Block],
-  preambulo: List[Paragraph], articulacao: List[Block], otherCaracteristicas: Map[String, Boolean] = Map()) extends Logging {
+  preambulo: List[Paragraph], articulacao: List[Block],
+  localData: List[Paragraph] = Nil,
+  assinaturas: List[Paragraph] = Nil,
+  anexos: List[Anexo] = Nil,
+  otherCaracteristicas: Map[String, Boolean] = Map()) extends Logging {
   import ProjetoLei._
   lazy val toNodeSeq: NodeSeq =
     <projetolei>
       <preEpigrafe>{ NodeSeq fromSeq (preEpigrafe.flatMap(_.toNodeSeq)) }</preEpigrafe>
-			{ementa.map(x => <ementa>{x.toNodeSeq}</ementa>).getOrElse(NodeSeq.Empty) }      
+			{ementa.map(x => <ementa>{x.toNodeSeq}</ementa>).getOrElse(NodeSeq.Empty) }
       <preambulo>{ NodeSeq fromSeq preambulo.flatMap(_.toNodeSeq) }</preambulo>
       <articulacao>{ NodeSeq fromSeq (articulacao.flatMap(_.toNodeSeq)) }</articulacao>
     </projetolei>
@@ -113,9 +137,27 @@ case object Legislacao extends Marcador { val id = 3 }
 case object Assinatura extends Marcador { val id = 4 }
 case object Articulacao extends Marcador { val id = 5 }
 
+/**
+ * Result of partitioning the post-preambulo blocks: a sequence of
+ * (marker, blocks) chunks in document order. Unlike a Map this keeps multiple
+ * Anexo buckets distinct (a doc may have ANEXO I, ANEXO II, …).
+ */
+case class MarcadoresResult(chunks: List[(Marcador, List[Block])]) {
+  /** All blocks for a given marker, concatenated in document order. */
+  def all(m: Marcador): List[Block] =
+    chunks.collect { case (mm, bs) if mm == m => bs }.flatten
+
+  /** Anexo buckets in document order. */
+  def anexos: List[List[Block]] =
+    chunks.collect { case (Anexo, bs) => bs }
+
+  def withChunks(c: List[(Marcador, List[Block])]): MarcadoresResult =
+    MarcadoresResult(c)
+}
+
 case class Marcadores(profile: DocumentProfile,
   localData: Boolean = false, justificacao: Boolean = false,
-  anexo: Boolean = false, legislacao: Boolean = false,
+  anexoCount: Int = 0, legislacao: Boolean = false,
   assinatura: Boolean = false) {
 
   def oneOf(r: List[Regex]) = (b: Block) => b match {
@@ -135,48 +177,44 @@ case class Marcadores(profile: DocumentProfile,
   def reconheceMarcador(b: Block): Option[Marcador] =
     reMarcadores.toList collectFirst { case (n, f) if f(b) => n }
 
+  // For Anexo we always allow re-entry (each "ANEXO N" header opens a new
+  // bucket). Other markers stay one-shot, matching the original behaviour.
   def reconhece(b: Block): Option[(Marcadores, Marcador)] = {
     reconheceMarcador(b) match {
       case None => None
       case Some(m) => m match {
-        case LocalData => if (localData) None else {
-          Some(copy(localData = true), m)
-        }
-        case Justificacao => if (justificacao) None else {
-          Some(copy(justificacao = true), m)
-        }
-        case Anexo => if (anexo) None else {
-          Some(copy(anexo = true), m)
-        }
-        case Legislacao => if (legislacao) None else {
-          Some(copy(legislacao = true), m)
-        }
-        case Assinatura => if (assinatura) None else {
-          Some(copy(assinatura = true), m)
-        }
+        case LocalData => if (localData) None else Some(copy(localData = true), m)
+        case Justificacao => if (justificacao) None else Some(copy(justificacao = true), m)
+        case Anexo => Some(copy(anexoCount = anexoCount + 1), m)
+        case Legislacao => if (legislacao) None else Some(copy(legislacao = true), m)
+        case Assinatura => if (assinatura) None else Some(copy(assinatura = true), m)
         case Articulacao => throw new RuntimeException("reconheceMarcador nunca pode reconhecer a articulação")
       }
     }
   }
 
-  def span(bl: List[Block]): Map[Marcador, List[Block]] = {
+  def span(bl: List[Block]): MarcadoresResult = {
+    // The block that triggers a marker switch becomes the first block of
+    // the new bucket (not the closing one of the previous). This is needed
+    // so that lines like "Brasília, …" (LocalData) and "ANEXO I" (Anexo)
+    // survive into their own bucket where downstream rendering can use them.
     def seek(ms: Marcadores,
       m: Marcador,
       accum: List[Block],
-      blockMap: Map[Marcador, List[Block]],
-      blocks: List[Block]): Map[Marcador, List[Block]] =
+      acc: List[(Marcador, List[Block])],
+      blocks: List[Block]): List[(Marcador, List[Block])] =
       blocks match {
-        case Nil => blockMap + ((m, accum.reverse))
+        case Nil => ((m, accum.reverse) :: acc).reverse
         case (b :: bl) => (ms.reconhece(b)) match {
-          case None => seek(ms, m, b :: accum, blockMap, bl)
+          case None => seek(ms, m, b :: accum, acc, bl)
           case Some((ms2, m2)) =>
-            seek(ms2, m2, Nil, blockMap + ((m, accum.reverse)), bl)
+            seek(ms2, m2, List(b), (m, accum.reverse) :: acc, bl)
         }
       }
-    seek(this, Articulacao, List(), Map(), bl)
+    MarcadoresResult(seek(this, Articulacao, List(), List(), bl))
   }
 
-  val finished = (localData || assinatura) && justificacao && anexo && legislacao
+  val finished: Boolean = (localData || assinatura) && justificacao && anexoCount > 0 && legislacao
 }
 
 class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
@@ -334,24 +372,34 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
           }
       
       val ms = Marcadores(profile)
-      val elementos = ms.span(posPreambulo)
+      val elementos0 = ms.span(posPreambulo)
 
-      System.err.println(s"\n[DEBUG parseArticulacao] elementos: '${elementos}'")
-      
+      System.err.println(s"\n[DEBUG parseArticulacao] elementos: '${elementos0}'")
 
-      if (!elementos.contains(Articulacao)) {
+      if (!elementos0.chunks.exists(_._1 == Articulacao)) {
         throw ParseException(ArticulacaoNaoIdentificada)
       }
 
+      // Promote trailing post-signature content into an implicit Anexo when
+      // there is no explicit "ANEXO" heading. See implicitAnexoPromotion docs.
+      val elementos = implicitAnexoPromotion(elementos0, profile)
+
       val urnContexto = metadado.urnContextoLinker
 
-      val articulacao1 = elementos(Articulacao) ++ trailingTables(elementos)
-      val articulacao = parseArticulacao(articulacao1,urnContexto = urnContexto)
-      val possuiImagem = (preEpigrafe ++ List(epigrafe) ++ preambulo ++ articulacao1).exists({
+      val articulacao1 = elementos.all(Articulacao) ++ trailingTables(elementos)
+      val articulacao = parseArticulacao(articulacao1, urnContexto = urnContexto)
+
+      val anexoBlocksAll = elementos.anexos.flatMap(_.collect { case b => b })
+      val possuiImagem = (preEpigrafe ++ List(epigrafe) ++ preambulo ++ articulacao1 ++ anexoBlocksAll).exists({
         case p: Paragraph => (p.nodes \\ "img").nonEmpty
         case Image => true
         case _ => false
       })
+
+      val localDataPars = elementos.all(LocalData).collect { case p: Paragraph if p.text.nonEmpty => p }
+      val assinaturaPars = elementos.all(Assinatura).collect { case p: Paragraph if p.text.nonEmpty => p }
+
+      val anexos = buildAnexos(elementos.anexos, urnContexto)
 
       import Caracteristicas._
 
@@ -365,6 +413,9 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
         ementa = ementa.map(x => reconheceLinks(x,urnContexto)),
         preambulo = preambulo,
         articulacao = articulacao,
+        localData = localDataPars,
+        assinaturas = assinaturaPars,
+        anexos = anexos,
         otherCaracteristicas = otherCaracteristicas)
 
       val falhas = try {
@@ -396,15 +447,182 @@ object ProjetoLeiParser {
     bl.dropWhile(isEmptyPar).reverse.dropWhile(isEmptyPar).reverse
   }
 
-  // Tables that appear after a tail-marker switch (LocalData / Assinatura /
-  // Anexo / Justificacao / Legislacao) would otherwise be silently dropped,
-  // because only elementos(Articulacao) is consumed downstream. Salvage them
-  // and let parseArticulacao attach them to the last article via spanNivel.
+  // Tables stuck under non-Articulacao non-Anexo tail markers (LocalData /
+  // Justificacao / Legislacao / Assinatura) would otherwise be silently
+  // dropped. Salvage them so parseArticulacao can attach them to the last
+  // article via spanNivel. Anexo tables stay in the Anexo bucket.
   private val tailMarkers: List[Marcador] =
-    List(LocalData, Justificacao, Anexo, Legislacao, Assinatura)
+    List(LocalData, Justificacao, Legislacao, Assinatura)
 
-  private def trailingTables(elementos: Map[Marcador, List[Block]]): List[Block] =
-    tailMarkers.flatMap(elementos.getOrElse(_, Nil)).collect { case t: Table => t }
+  private def trailingTables(elementos: MarcadoresResult): List[Block] =
+    tailMarkers.flatMap(elementos.all).collect { case t: Table => t }
+
+  // ----------------------------- Implicit Anexo --------------------------------
+  //
+  // Some legal docs end with extra material (tables, heading paragraphs) that
+  // sits AFTER the signing block but lacks a literal "ANEXO" header. Without
+  // help that material lands in the LocalData/Assinatura bucket and gets
+  // dropped. We promote it to an implicit Anexo when:
+  //  - no explicit Anexo bucket exists, AND
+  //  - the trailing region (after the last name-like signing line) contains
+  //    at least one Table, OL, or an administrative-heading paragraph
+  //    (all-caps + administrative keyword, or followed by a Table).
+
+  // Words that strongly suggest the line is anexo content rather than a
+  // person's name. All-caps headings carrying any of these are NOT treated
+  // as signing-tail lines.
+  private val anexoHeadingKeywordRe =
+    """(?i)\b(tabela|anexo|conselho|departamento|comiss[aã]o|secretaria|minist[eé]rio|presid[eê]ncia|gabinete|tribunal|junta|cargos?|provimento|fundo|programa|or[gç]amento|crit[eé]rios?|defini[cç]oes|disposi[cç][oõ]es|relac[aã]o|listagem|itens?|grupo|categoria)\b""".r
+
+  private val rejectImplicitAnexoPatterns: List[Regex] = List(
+    "^publicado em"r,
+    """^p\.\s*\d"""r,
+    "^d\\.o\\.u"r
+  )
+
+  /** Strict person-name detector: 1-6 short words, leading caps required,
+   *  no digits, no administrative keywords. Used as part of the signing-tail
+   *  scan that decides where the implicit anexo starts.
+   *  Operates on unormalizedText so case is preserved. */
+  private def looksLikePersonName(p: Paragraph): Boolean = {
+    val raw = p.unormalizedText.trim
+    if (raw.length < 2 || raw.length > 70) return false
+    if (raw.exists(_.isDigit)) return false
+    if (anexoHeadingKeywordRe.findFirstIn(raw).isDefined) return false
+    val words = raw.split("\\s+").filter(_.nonEmpty)
+    if (words.length < 1 || words.length > 6) return false
+    val firstChar = raw.head
+    if (!firstChar.isUpper) return false
+    words.forall { w =>
+      val core = w.stripSuffix(".")
+      core.length <= 25 && core.nonEmpty && core.forall(c => c.isLetter || c == '-' || c == '\'')
+    }
+  }
+
+  /** Heading-like = all-letters-uppercase, length ≥ 3, no terminal punctuation,
+   *  contains at least one administrative-style keyword.
+   *  Operates on unormalizedText so case is preserved. */
+  private def isAdministrativeHeading(p: Paragraph): Boolean = {
+    val t = p.unormalizedText.trim
+    if (t.length < 3) return false
+    if (t.endsWith(".") || t.endsWith(":") || t.endsWith(";")) return false
+    val letters = t.filter(_.isLetter)
+    if (letters.isEmpty || !letters.forall(_.isUpper)) return false
+    val nt = normalizer.normalize(t.toLowerCase)
+    if (rejectImplicitAnexoPatterns.exists(_.findFirstIn(nt).isDefined)) return false
+    anexoHeadingKeywordRe.findFirstIn(t).isDefined
+  }
+
+  private def looksLikeAnexoContent(blocks: List[Block]): Boolean = blocks.exists {
+    case _: Table => true
+    case _: OL => true
+    case p: Paragraph => isAdministrativeHeading(p)
+    case _ => false
+  }
+
+  /** Walks blocks from index 0 forward and returns the index AFTER the
+   *  last contiguous signing block. The signing region begins with a
+   *  LocalData/Assinatura match (e.g. "Brasília, ...") and may include
+   *  subsequent person-name paragraphs. The first paragraph that is neither
+   *  a signing-regex hit nor a person name (or any Table/OL) ends the
+   *  signing region. */
+  private def signingRegionEnd(blocks: List[Block], profile: DocumentProfile): Int = {
+    val isSig = (p: Paragraph) => {
+      val n = normalizer.normalize(p.text.trim.toLowerCase)
+      profile.regexLocalData.exists(_.findFirstIn(n).isDefined) ||
+        profile.regexAssinatura.exists(_.findFirstIn(n).isDefined)
+    }
+    var i = 0
+    var lastSigIdx = -1
+    while (i < blocks.length) {
+      blocks(i) match {
+        case p: Paragraph if p.text.trim.isEmpty =>
+          // empty paragraph: keep scanning, don't move lastSigIdx
+        case p: Paragraph if isSig(p) || looksLikePersonName(p) =>
+          lastSigIdx = i
+        case _: Paragraph => return lastSigIdx + 1
+        case _: Table | _: OL => return lastSigIdx + 1
+        case _ => return lastSigIdx + 1
+      }
+      i += 1
+    }
+    lastSigIdx + 1
+  }
+
+  def implicitAnexoPromotion(elementos: MarcadoresResult): MarcadoresResult =
+    implicitAnexoPromotion(elementos, profile = null)
+
+  def implicitAnexoPromotion(elementos: MarcadoresResult, profile: DocumentProfile): MarcadoresResult = {
+    val hasExplicitAnexo = elementos.chunks.exists(_._1 == Anexo)
+    if (hasExplicitAnexo) return elementos
+
+    val chunks = elementos.chunks
+    val lastIdx = chunks.lastIndexWhere { case (m, _) => m == LocalData || m == Assinatura }
+    if (lastIdx < 0) return elementos
+    if (lastIdx != chunks.length - 1) return elementos
+
+    val (m, bs) = chunks(lastIdx)
+    val splitAt = if (profile != null) signingRegionEnd(bs, profile) else signingRegionEndDefault(bs)
+    val (kept, tail0) = bs.splitAt(splitAt)
+    val tail = trimEmptyPars(tail0)
+    if (tail.isEmpty || !looksLikeAnexoContent(tail)) return elementos
+
+    val newChunks = chunks.take(lastIdx) ++ List((m, kept), (Anexo, tail))
+    elementos.withChunks(newChunks)
+  }
+
+  private val defaultLocalDataRe = List(
+    "^sala da sess"r, "^sala das sess"r, "^camara dos deputados"r,
+    "^senado federal"r, "^brasilia,"r, "^rio de janeiro,"r,
+    "^congresso nacional,"r
+  )
+
+  private def signingRegionEndDefault(blocks: List[Block]): Int = {
+    val isSig = (p: Paragraph) => {
+      val n = normalizer.normalize(p.text.trim.toLowerCase)
+      defaultLocalDataRe.exists(_.findFirstIn(n).isDefined)
+    }
+    var i = 0
+    var lastSigIdx = -1
+    while (i < blocks.length) {
+      blocks(i) match {
+        case p: Paragraph if p.text.trim.isEmpty =>
+        case p: Paragraph if isSig(p) || looksLikePersonName(p) =>
+          lastSigIdx = i
+        case _: Paragraph => return lastSigIdx + 1
+        case _: Table | _: OL => return lastSigIdx + 1
+        case _ => return lastSigIdx + 1
+      }
+      i += 1
+    }
+    lastSigIdx + 1
+  }
+
+  // ----------------------------- Build Anexos ---------------------------------
+
+  /**
+   * Convert each Anexo bucket of Blocks into an Anexo case-class instance.
+   * If the first paragraph matches "ANEXO ..." it's stored as titulo and
+   * stripped from the body. Trailing/leading empty paragraphs are trimmed.
+   * Links are recognised over paragraphs so external references are linked.
+   */
+  def buildAnexos(buckets: List[List[Block]], urnContexto: String): List[Anexo] = {
+    val anexoHeadRe = "(?i)^anexo\\b".r
+    buckets.zipWithIndex.flatMap { case (raw, idx) =>
+      val trimmed = trimEmptyPars(raw)
+      if (trimmed.isEmpty) None
+      else {
+        val (titulo, body0) = trimmed match {
+          case (p: Paragraph) :: tail
+              if anexoHeadRe.findFirstIn(normalizer.normalize(p.text.trim.toLowerCase)).isDefined =>
+            (Some(p), tail)
+          case _ => (None, trimmed)
+        }
+        val body = trimEmptyPars(body0).map(reconheceLinks(_, urnContexto))
+        Some(Anexo(num = idx + 1, titulo = titulo, blocks = body, implicito = titulo.isEmpty))
+      }
+    }
+  }
 
   private def oneOf(r: List[Regex]) = (b: Block) => b match {
     case p: Paragraph => r.find(_.findFirstIn(p.text).isDefined).map(_ => p)

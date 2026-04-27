@@ -533,41 +533,72 @@ object FECmdLine {
   }
 
   
-  def renderAndValidaXML(pl : ProjetoLei) : (Elem,List[ParseProblem]) = {
+  def renderAndValidaXML(pl : ProjetoLei) : (Elem, List[(br.gov.lexml.parser.pl.Anexo, Elem)], List[ParseProblem]) = {
     val pl2 = pl.remakeEpigrafe
-    val res = LexmlRenderer.render(pl2)  
-    val falhasXML = try { 
-      new Validation().validaComSchema(res).toList
+    val (primary, anexoDocs) = LexmlRenderer.renderAll(pl2)
+    val falhasXML = try {
+      val all = primary :: anexoDocs.map(_._2)
+      all.flatMap(e => new Validation().validaComSchema(e).toList)
     } catch {
       case _ : Exception => List()
     }
-    (res,falhasXML)
+    (primary, anexoDocs, falhasXML)
   }
-  
+
+  /** When -o is a file path foo.xml, anexo siblings are written next to it as
+   *  foo.anexo1.xml, foo.anexo2.xml, … When output is stdout, sibling docs are
+   *  printed sequentially separated by a single newline (caller can split). */
+  private def writeAnexoSiblings(output: SinkType, anexoDocs: List[(br.gov.lexml.parser.pl.Anexo, Elem)], verbose: Boolean): Unit = {
+    if (anexoDocs.isEmpty) return
+    output match {
+      case SK_File(f) =>
+        val name = f.getName
+        val (stem, ext) = name.lastIndexOf('.') match {
+          case -1 => (name, "")
+          case i => (name.substring(0, i), name.substring(i))
+        }
+        val parent = Option(f.getParentFile).getOrElse(new File("."))
+        anexoDocs.foreach { case (a, doc) =>
+          val sibling = new File(parent, s"$stem.${a.urnFragment}$ext")
+          FileUtils.writeByteArrayToFile(sibling, doc.toString.getBytes("utf-8"))
+          if (verbose) println(s"anexo: wrote $sibling")
+        }
+      case SK_Stdout =>
+        anexoDocs.foreach { case (_, doc) =>
+          System.out.write(doc.toString.getBytes("utf-8"))
+          System.out.write('\n')
+        }
+        System.out.flush()
+    }
+  }
+
   def process(profile : DocumentProfile, md : Metadado, input : SourceType, mimeType : String, output : SinkType,
               linkerPath : Option[File], verbose : Boolean, errorOutput : ErrorOutput): Unit = {
-    XHTMLProcessor.pipelineWithDefaultConverter(input.toByteArray, mimeType) foreach { 
+    XHTMLProcessor.pipelineWithDefaultConverter(input.toByteArray, mimeType) foreach {
       xhtml =>
-        val blocks = Block fromNodes xhtml        
+        val blocks = Block fromNodes xhtml
         val (mpl1, falhasValidacao) = new ProjetoLeiParser(profile).fromBlocks(md, blocks)
         //Linker.system.terminate().wait() // Porque parar o linker aqui?
-        val (res : Option[Elem],falhasXML : List[ParseProblem]) = mpl1 match {
-          case None => (None,List())
+        val (res: Option[Elem], anexoDocs: List[(br.gov.lexml.parser.pl.Anexo, Elem)], falhasXML: List[ParseProblem]) = mpl1 match {
+          case None => (None, List.empty[(br.gov.lexml.parser.pl.Anexo, Elem)], List.empty[ParseProblem])
           case Some(pl) =>
-            try { val (xml,probs) = renderAndValidaXML(pl) ; (Some(xml),probs) } catch {
-            case ex : Exception =>
-              ex.printStackTrace()
-              (None,List(ErroNaRenderizacao(ex)))
-          }
+            try {
+              val (xml, anex, probs) = renderAndValidaXML(pl)
+              (Some(xml), anex, probs)
+            } catch {
+              case ex: Exception =>
+                ex.printStackTrace()
+                (None, List.empty[(br.gov.lexml.parser.pl.Anexo, Elem)], List(ErroNaRenderizacao(ex)))
+            }
         }
         val falhas = falhasValidacao ++ falhasXML
-        
-        res foreach {
-          rootElem =>
-            output.write(rootElem.toString.getBytes("utf-8"))
+
+        res foreach { rootElem =>
+          output.write(rootElem.toString.getBytes("utf-8"))
         }
+        writeAnexoSiblings(output, anexoDocs, verbose)
         if (falhas.nonEmpty) {
-          errorOutput.writeErrors(falhas)          
+          errorOutput.writeErrors(falhas)
         }
     }
   }

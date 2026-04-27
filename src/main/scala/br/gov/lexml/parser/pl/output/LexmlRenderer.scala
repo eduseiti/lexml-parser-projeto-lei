@@ -3,7 +3,7 @@ package br.gov.lexml.parser.pl.output
 import br.gov.lexml.parser.pl.metadado.Metadado
 import br.gov.lexml.parser.pl.rotulo._
 import br.gov.lexml.parser.pl.block._
-import br.gov.lexml.parser.pl.ProjetoLei
+import br.gov.lexml.parser.pl.{Anexo, ProjetoLei}
 import br.gov.lexml.parser.pl.rotulo.rotuloParser.{Fem, Genero}
 
 import scala.xml._
@@ -311,6 +311,17 @@ object LexmlRenderer {
     <Metadado>
       <Identificacao URN={ m.urn }/>
     </Metadado>
+
+  /** Metadata for an anexo sibling document. The URN is the parent URN with
+   *  a fragment-style suffix "!anexoN", which keeps the anexo bound to its
+   *  parent document. */
+  def renderMetadadoAnexo(m: Metadado, a: Anexo): NodeSeq = {
+    val urn = m.urn + "!" + a.urnFragment
+    <Metadado>
+      <Identificacao URN={ urn }/>
+    </Metadado>
+  }
+
   def renderParteInicial(pl: ProjetoLei): NodeSeq =
     <ParteInicial>
       <Epigrafe id="epigrafe">{ renderParagraphWithoutP(pl.epigrafe) }</Epigrafe>
@@ -318,25 +329,128 @@ object LexmlRenderer {
       <Preambulo id="preambulo">{ NodeSeq fromSeq pl.preambulo.flatMap(p => cleanBs(p.toNodeSeq)) }</Preambulo>
     </ParteInicial>
 
+  /** Heuristic: a paragraph is a date/local line if it starts with "Brasília,"
+   *  "Sala", "Senado Federal", "Câmara dos Deputados", or matches a date-ish
+   *  prefix. Others are treated as signatures (NomePessoa). */
+  private val localDataPrefixRe =
+    """(?i)^(brasília|brasilia|sala (da|das)|senado federal|câmara dos deputados|camara dos deputados|congresso nacional|rio de janeiro)\b""".r
+
+  private def looksLikeDateLine(p: Paragraph): Boolean =
+    localDataPrefixRe.findFirstIn(p.unormalizedText.trim).isDefined
+
+  /** ParteFinal carries LocalDataFecho + Assinatura.
+   *  Schema (lexml-xml-schemas v4.0.2 — what the bundled validator uses):
+   *   - ParteFinal     = LocalDataFecho?, (AssinaturaGrupo* | Assinatura* | AssinaturaTexto*)
+   *   - LocalDataFecho = parsType (1..n <p>, NO id attribute allowed)
+   *   - Assinatura     = NomePessoa+, Cargo* (no attributes)
+   *  We split the recovered tail paragraphs: date-style lines emit one <p>
+   *  per paragraph inside <LocalDataFecho>; the remaining lines become
+   *  <NomePessoa> entries inside one <Assinatura>. */
+  def renderParteFinal(pl: ProjetoLei): NodeSeq = {
+    val all = (pl.localData ++ pl.assinaturas).filter(_.text.trim.nonEmpty)
+    if (all.isEmpty) return NodeSeq.Empty
+
+    val (dateLines, signatureLines) = all.partition(looksLikeDateLine)
+
+    val localData: NodeSeq =
+      if (dateLines.nonEmpty) {
+        <LocalDataFecho>{
+          dateLines.map(p => <p>{ p.unormalizedText.trim }</p>)
+        }</LocalDataFecho>
+      } else NodeSeq.Empty
+    val assinatura: NodeSeq =
+      if (signatureLines.nonEmpty) {
+        <Assinatura>{
+          signatureLines.map(p => <NomePessoa>{ p.unormalizedText.trim }</NomePessoa>)
+        }</Assinatura>
+      } else NodeSeq.Empty
+    <ParteFinal>{ localData }{ assinatura }</ParteFinal>
+  }
+
+  /** <Anexos> reference list: one <ReferenciaAnexo AlvoURN="…!anexoN"/> per
+   *  anexo attached to the Norma. ReferenciaAnexo has type refURN whose
+   *  required URN attribute is named AlvoURN (target URN). */
+  def renderAnexosReferencias(pl: ProjetoLei): NodeSeq = {
+    if (pl.anexos.isEmpty) NodeSeq.Empty
+    else {
+      val refs = pl.anexos.map { a =>
+        <ReferenciaAnexo AlvoURN={ pl.metadado.urn + "!" + a.urnFragment }/>
+      }
+      <Anexos>{ refs }</Anexos>
+    }
+  }
+
+  /** Render an anexo body (paragraphs / tables / OL / images) as a sequence
+   *  of LexML block elements suitable for <PartePrincipal>. Dispositivos
+   *  (when the anexo turned out to be articulated) are routed through the
+   *  normal renderBlocks path. */
+  def renderAnexoBlocks(a: Anexo): NodeSeq = {
+    val idBase = a.urnFragment + "_"
+    val (dispositivos, simples) = a.blocks.partition {
+      case _: Dispositivo => true
+      case _ => false
+    }
+    val simplesNodes: Seq[Node] = simples.zipWithIndex.flatMap {
+      case (p: Paragraph, _) => Seq[Node](<p>{ NodeSeq fromSeq p.nodes }</p>)
+      case (Table(elem), i) => Seq[Node](elem % new UnprefixedAttribute("id", idBase + "tab" + (i + 1), Null))
+      case (_: OL, _) => Seq.empty[Node]
+      case _ => Seq.empty[Node]
+    }
+    val dispNodes: NodeSeq =
+      if (dispositivos.isEmpty) NodeSeq.Empty
+      else renderBlocks(dispositivos, idBase)
+    NodeSeq.fromSeq(simplesNodes) ++ dispNodes
+  }
+
+  /** Sibling LexML document for one Anexo. Uses <DocumentoGenerico> /
+   *  <PartePrincipal> per the schema's OpenStructure model. */
+  def renderAnexoDoc(pl: ProjetoLei, a: Anexo): Elem = {
+    val tituloP: NodeSeq = a.titulo match {
+      case Some(p) => <p>{ NodeSeq fromSeq p.nodes }</p>
+      case None => NodeSeq.Empty
+    }
+    val parteId = a.urnFragment + "_pp"
+    <LexML xmlns="http://www.lexml.gov.br/1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.lexml.gov.br/1.0 ../xsd/lexml-br-rigido.xsd">
+      { renderMetadadoAnexo(pl.metadado, a) }
+      <Anexo>
+        <DocumentoGenerico>
+          <PartePrincipal id={ parteId }>
+            { tituloP }
+            { renderAnexoBlocks(a) }
+          </PartePrincipal>
+        </DocumentoGenerico>
+      </Anexo>
+    </LexML>
+  }
+
   import scala.xml.Utility.trim
 
   def render(pl: ProjetoLei): Elem = {
-    val norma =  (  
+    val norma =  (
         <Norma>
           { renderParteInicial(pl) }
           { renderArticulacao(pl.articulacao) }
+          { renderParteFinal(pl) }
+          { renderAnexosReferencias(pl) }
         </Norma>
       )
     //FIXME: tirar o comentário para habilitar
-    val encloseInProjetoNorma = true //pl.metadado.isProjetoNorma 		
+    val encloseInProjetoNorma = true //pl.metadado.isProjetoNorma
     val inner = if (encloseInProjetoNorma) {
       <ProjetoNorma>{norma}</ProjetoNorma>
     } else { norma }
-    (        
+    (
     <LexML xmlns="http://www.lexml.gov.br/1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.lexml.gov.br/1.0 ../xsd/lexml-br-rigido.xsd">
       <!--       xsi:schemaLocation="http://www.lexml.gov.br/1.0 http://projeto.lexml.gov.br/esquemas/lexml-br-rigido.xsd" > -->
       { renderMetadado(pl.metadado) }
-      { inner }      
+      { inner }
     </LexML>)
+  }
+
+  /** Render the primary LexML document and one sibling document per Anexo. */
+  def renderAll(pl: ProjetoLei): (Elem, List[(Anexo, Elem)]) = {
+    val primary = render(pl)
+    val anexoDocs = pl.anexos.map(a => (a, renderAnexoDoc(pl, a)))
+    (primary, anexoDocs)
   }
 }
