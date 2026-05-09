@@ -514,15 +514,19 @@ object Block extends Block {
         (omissis ++ nivelSuperior ++ l1, l2)
       } else {
         // When no immediately-superior dispositivos are found, check if a Table
-        // is blocking the view. Tables are transparent to spanning: we skip past
-        // them so sub-dispositivos after the table are still grouped with the
-        // parent dispositivo correctly. The table itself is NOT added to
-        // nivelSuperior — it stays at the outer (articulacao) level.
+        // follows. If something at the parent's level still follows the table,
+        // the table is included in the span (l1.nonEmpty branch) so it lands
+        // inside the owning Dispositivo. If the table is trailing (nothing
+        // follows), absorb it at any nivel within the article hierarchy
+        // (artigo and below) so it becomes a child of the current Dispositivo
+        // and the renderer produces the correctly-prefixed id (e.g.
+        // art3_cpt_tab1 inside <Caput>). Aggregator levels (capitulo, secao,
+        // …) keep returning (Nil, l) so tables at those levels are unchanged.
         afterSuperior match {
           case (t: Table) :: restAfterTable =>
             val (l1, l2) = proxSpan(restAfterTable)
             if (l1.nonEmpty) (omissis ++ List(t) ++ l1, l2)
-            else if (nivel == niveis.artigo) (omissis ++ List(t), restAfterTable)
+            else if (nivel >= niveis.artigo) (omissis ++ List(t), restAfterTable)
             else (Nil, l)
           case _ =>
             if (nivel == niveis.artigo) (omissis, posOmissis)
