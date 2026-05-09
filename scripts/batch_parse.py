@@ -62,9 +62,27 @@ RULES: list[tuple[tuple[str, ...], str, str]] = [
     (("decreto",), "federal", "decreto"),
 ]
 
-# Filenames starting with `res_<agency>` are regulatory-agency resolutions
-# that the parser has no profile for — skip with a precise reason.
+# Filenames starting with `res_<agency>` (e.g. `res_anatel_*`) are regulatory-
+# agency resolutions. The parser has no registered profile for
+# (autoridade=federal, tipoNorma=resolucao), so we route them through the
+# fallback profile (Lei) plus the runtime overrides in PROFILE_OVERRIDES.
 AGENCY_RESOLUTION_PREFIX = "res"
+AGENCY_LEGISLATIVE_TOKENS = frozenset({"senado", "camara", "congresso"})
+
+# Extra CLI flags appended when the detected (autoridade, tipoNorma) tuple
+# isn't backed by a registered DocumentProfile and the parser needs runtime
+# overrides to teach the fallback profile (Lei) about the actual epigraph
+# format. The pos-epigrafe regex skips Anatel website boilerplate that sits
+# between the epigraph and the ementa; it's harmless on docs without those
+# lines (no match → no skip).
+PROFILE_OVERRIDES: dict[tuple[str, str], list[str]] = {
+    ("federal", "resolucao"): [
+        "--prof-regex-epigrafe", "^resolucao",
+        "--prof-regex-epigrafe-continuacao", r"^resolucao%^n[oº°˚]",
+        "--prof-regex-pos-epigrafe", r"^publicado:%^left\d%^acessos:",
+        "--prof-epigrafe-head", "RESOLUÇÃO",
+    ],
+}
 
 
 @dataclass
@@ -74,6 +92,7 @@ class Detection:
     numero: str | None = None
     data: str | None = None  # YYYY-MM-DD
     ano: str | None = None   # YYYY
+    agency: str | None = None  # set for `res_<agency>_*` filenames
     skip_reason: str | None = None
 
 
@@ -166,15 +185,34 @@ def detect(stem: str) -> Detection:
     if not tokens:
         return Detection(skip_reason="Empty filename")
 
-    # Agency-resolution special case: `res_<agency>_...`.
-    if tokens[0] == AGENCY_RESOLUTION_PREFIX and len(tokens) >= 2:
-        second = tokens[1]
-        # Allow res_senado / res_camara / res_congresso to fall through to
-        # the general rule engine below by NOT returning early here.
-        if second not in {"senado", "camara", "congresso"}:
-            return Detection(
-                skip_reason=f"Unsupported agency resolution: {second}"
-            )
+    # Agency-resolution special case: `res_<agency>_...`. Route to the
+    # (federal, resolucao) fallback profile + PROFILE_OVERRIDES. Legislative
+    # variants (res_senado / res_camara / res_congresso) fall through to the
+    # general RULES engine below.
+    if (tokens[0] == AGENCY_RESOLUTION_PREFIX
+            and len(tokens) >= 2
+            and tokens[1] not in AGENCY_LEGISLATIVE_TOKENS):
+        det = Detection(
+            autoridade="federal",
+            tipo_norma="resolucao",
+            agency=tokens[1],
+        )
+        # Skip the `res` + `<agency>` tokens when scanning for numero/ano/data.
+        matched_len = 2
+        for t in tokens[matched_len:]:
+            if not t.isdigit():
+                continue
+            if len(t) == 8 and det.data is None:
+                y, m, d = t[:4], t[4:6], t[6:8]
+                if "1000" <= y <= "2999" and "01" <= m <= "12" and "01" <= d <= "31":
+                    det.data = f"{y}-{m}-{d}"
+                    continue
+            if len(t) == 4 and det.ano is None and "1000" <= t <= "2999":
+                det.ano = t
+                continue
+            if det.numero is None:
+                det.numero = t
+        return det
 
     matched_len = 0
     autoridade: str | None = None
@@ -237,6 +275,7 @@ def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
         args += ["--data", det.data]
     elif det.ano:
         args += ["--ano", det.ano]
+    args += PROFILE_OVERRIDES.get((det.autoridade or "", det.tipo_norma or ""), [])
     if linker is not None:
         args += ["--linker", str(linker)]
     return args
