@@ -254,22 +254,27 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
     }
   }
 
+  // True when a block looks like the start of the articulacao — i.e. its
+  // rotulo nivel sits at or above the maximum nivel accepted at the document
+  // root. Shared by reconhecePreambulo and unwrapLeadingLayoutTables so the
+  // "before articulacao" boundary is computed identically in both places.
+  private val isArticulacaoStart: Block => Boolean = {
+    case p: Paragraph => rotuloParser.parseRotulo(p.text) match {
+      case Some((rotulo, _)) => rotulo.nivel <= niveis.nivel_maximo_aceito_na_raiz
+      case None => false
+    }
+    case _ => false
+  }
+
   private def reconhecePreambulo(bl: List[Block]): (List[Block], List[Paragraph], List[Block]) = {
     val isPreambulo = matchesOneOf(profile.regexPreambulo)
     val isPosEpigrafe = matchesOneOf(profile.regexPosEpigrafe)
-    val isArticulacao: Block => Boolean = {
-      case p: Paragraph => rotuloParser.parseRotulo(p.text) match {
-        case None => false
-        case Some((rotulo, _)) => rotulo.nivel <= niveis.nivel_maximo_aceito_na_raiz
-      }
-      case x => false
-    }
-    val (prePreambulo, preAmbuloAndPos) = bl.span(x => !isPreambulo(x) && !isArticulacao(x))
+    val (prePreambulo, preAmbuloAndPos) = bl.span(x => !isPreambulo(x) && !isArticulacaoStart(x))
 
     // System.err.println(s"[DEBUG reconhecePreambulo] prePreambulo: '${prePreambulo}'")
     // System.err.println(s"[DEBUG reconhecePreambulo] preAmbuloAndPos: '${preAmbuloAndPos}'")
 
-    val (preAmbulo1, posPreambulo) = preAmbuloAndPos.span(!isArticulacao(_))
+    val (preAmbulo1, posPreambulo) = preAmbuloAndPos.span(!isArticulacaoStart(_))
 
     // System.err.println(s"\n[DEBUG reconhecePreambulo] preAmbulo1: '${preAmbulo1}'")
     // System.err.println(s"\n[DEBUG reconhecePreambulo] posPreambulo: '${posPreambulo}'")
@@ -345,14 +350,39 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
       articulacao11_1
     }
   }
+  // Casa Civil DOCX/HTML originals frequently wrap the heading area (image
+  // banner, epigrafe, ementa) in layout tables. Those tables become Table
+  // blocks and trip the ementa validator (which requires Paragraph blocks).
+  // Flatten any Table that appears before the first articulacao block —
+  // tables inside the articulacao are left untouched so real data tables
+  // continue to render as <table> in the output (see commits 7c9a9a4 / d8f0108).
+  private def unwrapLeadingLayoutTables(blocks: List[Block]): List[Block] = {
+    val (head, tail) = blocks.span(b => !isArticulacaoStart(b))
+    val flattenedHead = head.flatMap {
+      case Table(elem) =>
+        // Each cell's children are inline content (text, <span>, …), not
+        // wrapped in <p>. Wrap them so Block.fromNodes turns each cell into
+        // a Paragraph.
+        val cellParagraphs = (elem \ "tr" \ "td").toList.flatMap { td =>
+          val children = td.child.toList
+          if (children.isEmpty) Nil
+          else List(<p>{children}</p>)
+        }
+        Block.fromNodes(cellParagraphs)
+      case b => List(b)
+    }
+    flattenedHead ++ tail
+  }
+
   def fromBlocks(metadado: Metadado, blocks: List[Block]): (Option[ProjetoLei], List[ParseProblem]) = {
     try {
+      val unwrappedBlocks = unwrapLeadingLayoutTables(blocks)
       val (preEpigrafe, epigrafe, posEpigrafe) = {
         if (profile.regexEpigrafe.isEmpty) {
-          (List(), Paragraph(List()), blocks)
+          (List(), Paragraph(List()), unwrappedBlocks)
         } else {
-          spanEpigrafe(blocks) match {
-            case None if !profile.epigrafeObrigatoria => (List(), Paragraph(List()), blocks)
+          spanEpigrafe(unwrappedBlocks) match {
+            case None if !profile.epigrafeObrigatoria => (List(), Paragraph(List()), unwrappedBlocks)
             case Some(p @ (pre, _, _)) if profile.preEpigrafePermitida || pre.isEmpty => p
             case _ => throw ParseException(EpigrafeAusente)
           }
