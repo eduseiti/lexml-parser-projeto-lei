@@ -174,6 +174,52 @@ object DOCXReader {
     }
   }
 
+  /**
+   * Split a single <w:p> event stream into one or more sub-streams, breaking
+   * at each <w:br/> with type "line" (default), "page", or no type. <w:br
+   * w:type="column"/> stays inline. Each returned slice contains no <w:br/>
+   * StartElement / EndElement events, so collectText doesn't need to know
+   * about them. Word soft-break semantics: ANEXO I<w:br/>PRINCÍPIOS<w:br/>
+   * (Redação...) is three logical lines that should render as three <p>s.
+   */
+  private def splitParAtSoftBreaks(evs : Seq[XMLEvent]) : Seq[Seq[XMLEvent]] = {
+    import scala.jdk.CollectionConverters._
+    def isSplittingBrStart(ev : XMLEvent) : Boolean = ev match {
+      case se : StartElement
+        if se.getName.getNamespaceURI == XElem.wNs && se.getName.getLocalPart == "br" =>
+        val typeAttr = se.getAttributes.asScala
+          .collect { case a : Attribute => a }
+          .find(_.getName.getLocalPart == "type")
+          .map(_.getValue)
+        typeAttr match {
+          case None | Some("line") | Some("page") => true
+          case _ => false
+        }
+      case _ => false
+    }
+    val out = scala.collection.mutable.ListBuffer[Seq[XMLEvent]]()
+    val cur = scala.collection.mutable.ListBuffer[XMLEvent]()
+    var skipUntilBrEnd = false
+    for (ev <- evs) {
+      if (skipUntilBrEnd) {
+        ev match {
+          case ee : EndElement
+            if ee.getName.getNamespaceURI == XElem.wNs && ee.getName.getLocalPart == "br" =>
+            skipUntilBrEnd = false
+          case _ => ()
+        }
+      } else if (isSplittingBrStart(ev)) {
+        out += cur.toList
+        cur.clear()
+        skipUntilBrEnd = true
+      } else {
+        cur += ev
+      }
+    }
+    out += cur.toList
+    out.toSeq
+  }
+
   private def collectText(evs : Iterable[XMLEvent]) = {
     val segs1 = evs.foldLeft(Context())(processEvent).segments
     val segs2 = collapseBy(segs1) {
@@ -316,9 +362,11 @@ object DOCXReader {
 
       val nodes: LazyList[scala.xml.Elem] = bodyItems.flatMap {
         case ParItem(pEvs) =>
-          val segs = collectText(pEvs)
-          if (segs.isEmpty) None
-          else Some(<p>{ segs.flatMap(_.toXML) }</p>)
+          splitParAtSoftBreaks(pEvs).flatMap { subEvs =>
+            val segs = collectText(subEvs)
+            if (segs.isEmpty) None
+            else Some(<p>{ segs.flatMap(_.toXML) }</p>)
+          }
 
         case TblItem(tblEvs) =>
           Some(convertTable(tblEvs))
