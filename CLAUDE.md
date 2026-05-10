@@ -17,6 +17,44 @@ mvn -Ponejar package      # Build executable JAR
 
 Run the CLI: `java -jar target/lexml-parser-projeto-lei-1.15.0-onejar.jar [parse|parseArticulacao|dumpProfiles] [args]`
 
+## Test invocations
+
+Run from the repo root (`lexml-parser-projeto-lei/`). Always set
+`LC_ALL=C.UTF-8 LANG=C.UTF-8` so the parser handles Portuguese characters
+correctly. Sample DOCX inputs live at
+`../novas_normas_20260420/manual_20260421/`.
+
+### Decreto
+
+```bash
+LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-onejar.jar parse \
+   -m application/vnd.openxmlformats-officedocument.wordprocessingml.document \
+   -i ../novas_normas_20260420/manual_20260421/decreto_2338_1997.docx \
+   -o ../novas_normas_20260420/teste_decreto/decreto_2338_1997.xml \
+   --write-errors-to-file ../novas_normas_20260420/teste_decreto/decreto_2338_1997.err.log \
+   -t decreto -a federal -n 2338 --data 1997-10-07 \
+   --linker /usr/local/bin/linkertool
+```
+
+### Resolução
+
+Resoluções need extra `--prof-regex-*` overrides because the default
+profile expects a different epigraph/header pattern:
+
+```bash
+LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-onejar.jar parse \
+   -m application/vnd.openxmlformats-officedocument.wordprocessingml.document \
+   -i ../novas_normas_20260420/manual_20260421/res_anatel_612_2015.docx \
+   -o ../novas_normas_20260420/teste_resolucoes/res_anatel_612_2015.docx.xml \
+   --write-errors-to-file ../novas_normas_20260420/teste_resolucoes/res_anatel_612_2015.docx.err.log \
+   -t resolucao \
+   --prof-regex-epigrafe '^resolucao' \
+   --prof-regex-epigrafe-continuacao '^resolucao%^n[oº°˚]' \
+   --prof-regex-pos-epigrafe '^publicado:%^left\d%^acessos:' \
+   --prof-epigrafe-head 'RESOLUÇÃO' \
+   --linker /usr/local/bin/linkertool
+```
+
 ## Architecture
 
 Source lives under `src/main/scala/br/gov/lexml/parser/pl/`. The parsing pipeline flows through:

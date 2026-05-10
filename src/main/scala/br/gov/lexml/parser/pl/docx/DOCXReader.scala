@@ -147,14 +147,34 @@ object DOCXReader {
   }
 
   import XElem._
+
+  // OOXML toggle properties (e.g. <w:b/>, <w:i/>) accept w:val ∈ {true,false,1,0,on,off}.
+  // Absent attribute means ON. See ECMA-376 §17.3.2.1 / §17.3.2.16.
+  private def toggleVal(e : XElem) : Boolean =
+    e.attributes.get((XElem.wNs,"val")) match {
+      case Some("false") | Some("0") | Some("off") => false
+      case _ => true
+    }
+
+  // True when this rPr is the paragraph-mark rPr (direct child of pPr): its
+  // styles describe the ¶ glyph, not any run, and must not leak into runs.
+  private def isParagraphMarkRPr(stack : List[(XElem,TextStyle)]) : Boolean =
+    stack match {
+      case _ :: (parent, _) :: _ => parent.ns == Some(XElem.wNs) && parent.label == "pPr"
+      case _ => false
+    }
+
   private def processEvent(ctx : Context, event : XMLEvent) : Context = {
     (event,ctx.head) match {
       case (ev : StartElement,_) => ctx.enter(fromEvent(ev))
       case (ev : EndElement,Some(e)) if e.ns == Some(XElem.wNs) =>
         e.label match {
-          case "i" => ctx.leave(Some(s => s.copy(italics = true)))
-          case "b" => ctx.leave(Some(s => s.copy(bold = true)))
-          case "pPr" | "rPr" => ctx.leave(Some(x => x))
+          case "i" => ctx.leave(Some(s => s.copy(italics = toggleVal(e))))
+          case "b" => ctx.leave(Some(s => s.copy(bold = toggleVal(e))))
+          case "rPr" =>
+            if (isParagraphMarkRPr(ctx.stack)) ctx.leave()
+            else ctx.leave(Some(x => x))
+          case "pPr" => ctx.leave()
           case "tab" => ctx.add(Tab)
           case "vertAlign" =>
             e.attributes.get((XElem.wNs,"val")) match {
