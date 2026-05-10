@@ -350,6 +350,37 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
       articulacao11_1
     }
   }
+
+  /**
+   * Convert each Anexo bucket of Blocks into an Anexo case-class instance.
+   * If the first paragraph matches "ANEXO ..." it's stored as titulo and
+   * stripped from the body. The body is then routed through parseArticulacao
+   * so hierarchical legal structures (Capitulo, Secao, Artigo, ...) inside
+   * the annex are recognised — the schema (lexml-base.xsd) permits an annex
+   * to be a fully articulated document via DocumentoArticulado/Articulacao.
+   * If the body has no recognised dispositivos parseArticulacao returns it
+   * as Paragraphs/Tables, and the renderer falls back to DocumentoGenerico.
+   */
+  def buildAnexos(buckets: List[List[Block]], urnContexto: String): List[Anexo] = {
+    buckets.zipWithIndex.flatMap { case (raw, idx) =>
+      val trimmed = trimEmptyPars(raw)
+      if (trimmed.isEmpty) None
+      else {
+        val (titulo, body0) = trimmed match {
+          case (p: Paragraph) :: tail
+              if anexoHeadRe.findFirstIn(normalizer.normalize(p.text.trim.toLowerCase)).isDefined =>
+            (Some(p), tail)
+          case _ => (None, trimmed)
+        }
+        val bodyTrimmed = trimEmptyPars(body0)
+        // parseArticulacao already runs reconheceLinks + Linker.paraCadaAlteracao,
+        // so don't apply reconheceLinks again on the result.
+        val body = parseArticulacao(bodyTrimmed, urnContexto = urnContexto)
+        Some(Anexo(num = idx + 1, titulo = titulo, blocks = body, implicito = titulo.isEmpty))
+      }
+    }
+  }
+
   // Casa Civil DOCX/HTML originals frequently wrap the heading area (image
   // banner, epigrafe, ementa) in layout tables. Those tables become Table
   // blocks and trip the ementa validator (which requires Paragraph blocks).
@@ -628,31 +659,7 @@ object ProjetoLeiParser {
     lastSigIdx + 1
   }
 
-  // ----------------------------- Build Anexos ---------------------------------
-
-  /**
-   * Convert each Anexo bucket of Blocks into an Anexo case-class instance.
-   * If the first paragraph matches "ANEXO ..." it's stored as titulo and
-   * stripped from the body. Trailing/leading empty paragraphs are trimmed.
-   * Links are recognised over paragraphs so external references are linked.
-   */
-  def buildAnexos(buckets: List[List[Block]], urnContexto: String): List[Anexo] = {
-    val anexoHeadRe = "(?i)^anexo\\b".r
-    buckets.zipWithIndex.flatMap { case (raw, idx) =>
-      val trimmed = trimEmptyPars(raw)
-      if (trimmed.isEmpty) None
-      else {
-        val (titulo, body0) = trimmed match {
-          case (p: Paragraph) :: tail
-              if anexoHeadRe.findFirstIn(normalizer.normalize(p.text.trim.toLowerCase)).isDefined =>
-            (Some(p), tail)
-          case _ => (None, trimmed)
-        }
-        val body = trimEmptyPars(body0).map(reconheceLinks(_, urnContexto))
-        Some(Anexo(num = idx + 1, titulo = titulo, blocks = body, implicito = titulo.isEmpty))
-      }
-    }
-  }
+  private val anexoHeadRe = "(?i)^anexo\\b".r
 
   private def oneOf(r: List[Regex]) = (b: Block) => b match {
     case p: Paragraph => r.find(_.findFirstIn(p.text).isDefined).map(_ => p)

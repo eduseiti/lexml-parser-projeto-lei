@@ -259,8 +259,16 @@ object LexmlRenderer {
                     case _ => null 
                   }}>
             { d.links.map(l => Comment("Link: " + l)) }
-            { d.titulo.map(tit => <TituloDispositivo>{ cleanBs(tit.nodes) }</TituloDispositivo>).getOrElse(NodeSeq.Empty) }
-            { renderRotulo(d.rotulo) match { 
+            { d.titulo
+                // Aggregator dispositivos (Capitulo, Secao, Titulo, ...) extend
+                // the schema's `hierarchy` type, which only allows
+                // Rotulo + NomeAgrupador + AgrupamentoHierarquico — so
+                // <TituloDispositivo> is not valid here. The titulo content
+                // surfaces via NomeAgrupador (from conteudo) instead.
+                .filter(_ => !d.rotulo.isAgregador)
+                .map(tit => <TituloDispositivo>{ cleanBs(tit.nodes) }</TituloDispositivo>)
+                .getOrElse(NodeSeq.Empty) }
+            { renderRotulo(d.rotulo) match {
                 case Some(r) => <Rotulo>{ r }</Rotulo>
                 case _ => NodeSeq.Empty
                 } }
@@ -402,25 +410,88 @@ object LexmlRenderer {
     NodeSeq.fromSeq(simplesNodes) ++ dispNodes
   }
 
-  /** Sibling LexML document for one Anexo. Uses <DocumentoGenerico> /
-   *  <PartePrincipal> per the schema's OpenStructure model. */
+  /** True when the anexo body has been articulated (contains Dispositivos)
+   *  AND the schema-correct DocumentoArticulado/Articulacao container can
+   *  fit it without losing content. Returns false when there are tables/OLs
+   *  at the top level outside any dispositivo (Articulacao only accepts
+   *  hierElements, and Preambulo only accepts <p>) — those cases stay on
+   *  the DocumentoGenerico path. */
+  private def isArticulatedAnexo(a: Anexo): Boolean = {
+    val hasDispositivo = a.blocks.exists(_.isInstanceOf[Dispositivo])
+    if (!hasDispositivo) return false
+    a.blocks.forall {
+      case _: Dispositivo => true
+      case _: Paragraph => true
+      case _ => false
+    }
+  }
+
+  /** Sibling LexML document for one Anexo. Picks between the two schema
+   *  containers permitted by lexml-base.xsd:542-549:
+   *   - <DocumentoArticulado> (HierarchicalStructure) when the body parsed
+   *     into a hierarchical legal structure (Capitulo, Secao, Artigo, ...);
+   *   - <DocumentoGenerico> (OpenStructure) for purely textual / tabular
+   *     annexes. */
   def renderAnexoDoc(pl: ProjetoLei, a: Anexo): Elem = {
+    val body =
+      if (isArticulatedAnexo(a)) renderAnexoArticulado(a)
+      else renderAnexoGenerico(a)
+    <LexML xmlns="http://www.lexml.gov.br/1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.lexml.gov.br/1.0 ../xsd/lexml-br-rigido.xsd">
+      { renderMetadadoAnexo(pl.metadado, a) }
+      <Anexo>
+        { body }
+      </Anexo>
+    </LexML>
+  }
+
+  /** Articulated annex: <DocumentoArticulado> with optional <ParteInicial>
+   *  (Epigrafe for the "ANEXO N" titulo + Preambulo for any leading
+   *  paragraphs that did not become Dispositivos) and an <Articulacao>
+   *  containing the Dispositivos. */
+  private def renderAnexoArticulado(a: Anexo): Elem = {
+    val idBase = a.urnFragment + "_"
+    val (leading, rest) = a.blocks.span(!_.isInstanceOf[Dispositivo])
+    val dispositivos = rest.collect { case d: Dispositivo => d }
+
+    val epigrafe: NodeSeq = a.titulo match {
+      case Some(p) =>
+        <Epigrafe id={ idBase + "epigrafe" }>{ NodeSeq fromSeq p.nodes }</Epigrafe>
+      case None => NodeSeq.Empty
+    }
+    val leadingParagraphs = leading.collect { case p: Paragraph if p.text.nonEmpty => p }
+    val preambulo: NodeSeq = {
+      if (leadingParagraphs.isEmpty) NodeSeq.Empty
+      else {
+        <Preambulo id={ idBase + "preambulo" }>{
+          leadingParagraphs.flatMap(p => <p>{ NodeSeq fromSeq p.nodes }</p>)
+        }</Preambulo>
+      }
+    }
+    val parteInicial: NodeSeq = {
+      if (epigrafe.isEmpty && preambulo.isEmpty) NodeSeq.Empty
+      else <ParteInicial>{ epigrafe }{ preambulo }</ParteInicial>
+    }
+
+    <DocumentoArticulado>
+      { parteInicial }
+      <Articulacao>{ renderBlocks(dispositivos, idBase) }</Articulacao>
+    </DocumentoArticulado>
+  }
+
+  /** Textual annex: <DocumentoGenerico>/<PartePrincipal> per the schema's
+   *  OpenStructure model. */
+  private def renderAnexoGenerico(a: Anexo): Elem = {
     val tituloP: NodeSeq = a.titulo match {
       case Some(p) => <p>{ NodeSeq fromSeq p.nodes }</p>
       case None => NodeSeq.Empty
     }
     val parteId = a.urnFragment + "_pp"
-    <LexML xmlns="http://www.lexml.gov.br/1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.lexml.gov.br/1.0 ../xsd/lexml-br-rigido.xsd">
-      { renderMetadadoAnexo(pl.metadado, a) }
-      <Anexo>
-        <DocumentoGenerico>
-          <PartePrincipal id={ parteId }>
-            { tituloP }
-            { renderAnexoBlocks(a) }
-          </PartePrincipal>
-        </DocumentoGenerico>
-      </Anexo>
-    </LexML>
+    <DocumentoGenerico>
+      <PartePrincipal id={ parteId }>
+        { tituloP }
+        { renderAnexoBlocks(a) }
+      </PartePrincipal>
+    </DocumentoGenerico>
   }
 
   import scala.xml.Utility.trim
