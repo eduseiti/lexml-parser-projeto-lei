@@ -45,13 +45,13 @@ trait Converter {
         dir.listFiles(new PrefixFileFilter(prefix) : FileFilter).foreach(f => FileUtils.deleteQuietly(f))
 }
 
-final class DOCXConverter(otherConverter : Converter) extends Converter {
+final class DOCXConverter(otherConverter : Converter, dropStrikethrough : Boolean = true) extends Converter {
   override def convert(srcExtension: String, srcData: Array[Byte], dstExtension: String): Array[Byte] = {
 	  (srcExtension,dstExtension) match {
-	    case ("docx","xhtml") =>  
-	      DOCXReader.readDOCX(new ByteArrayInputStream(srcData)).
-	      		get.toString.getBytes("utf-8")   
-	    
+	    case ("docx","xhtml") =>
+	      DOCXReader.readDOCX(new ByteArrayInputStream(srcData), dropStrikethrough).
+	      		get.toString.getBytes("utf-8")
+
 	    case _ => otherConverter.convert(srcExtension,srcData,dstExtension)
 	  }
   }
@@ -173,7 +173,8 @@ object XHTMLProcessor extends Logging {
   }*/
 
   //val converter : Converter = new AbiwordConverter
-  private val defaultConverter: Converter = new DOCXConverter(new AbiwordConverter)
+  private def defaultConverter(dropStrikethrough : Boolean = true): Converter =
+    new DOCXConverter(new AbiwordConverter, dropStrikethrough)
 
   private def changeChildren[T <: Seq[Node]](f: Seq[Node] => Seq[Node]) = (e: T) => {
     e match {
@@ -437,19 +438,25 @@ object XHTMLProcessor extends Logging {
 
   })
 
-  private def fixSpans(nl: List[Node]): List[Node] = {
-    nl.flatMap({  
+  private def fixSpans(nl: List[Node], dropStrikethrough: Boolean = true): List[Node] = {
+    nl.flatMap({
 	    case e @ Elem(pref, label, attrs, scope, child @ _*) =>
-        val child2 = fixSpans(child.toList)
+        val child2 = fixSpans(child.toList, dropStrikethrough)
         e.label match {
-          case "span" => makeSpanOrIandB(pref, scope, attrs, child2)
+          case "span" => makeSpanOrIandB(pref, scope, attrs, child2, dropStrikethrough)
           case _ => List(Elem(pref, label, attrs, scope, true, child2: _*))
         }
       case n => List(n)
 	  })
   }
 
-  private def makeSpanOrIandB(prefix: String, scope: NamespaceBinding, attrs: MetaData, child: Seq[Node]): Seq[Node] = {
+  private val strikethroughTags = Set("s", "strike", "del")
+
+  private def dropStrikethroughElems: List[Node] => List[Node] = bottomUp(mapElements(
+    (n: Node) => Seq(n),
+    (e: Elem) => if (strikethroughTags.contains(e.label)) Seq.empty else Seq(e)))
+
+  private def makeSpanOrIandB(prefix: String, scope: NamespaceBinding, attrs: MetaData, child: Seq[Node], dropStrikethrough: Boolean = true): Seq[Node] = {
     
     def makePair(s: String) = s.span(c => c != ':') match {
       case (k, "") => (k, "")
@@ -474,7 +481,10 @@ object XHTMLProcessor extends Logging {
     val isSuperScript = styles.get("vertical-align").contains("super")
     val isSubScript = styles.get("vertical-align").contains("sub")
     val hasUnderline = styles.get("text-decoration").contains("underline")
-    
+    val hasLineThrough = styles.get("text-decoration").contains("line-through")
+
+    if (hasLineThrough && dropStrikethrough) return Seq.empty
+
     val otherStyles = styles - "font-style" - "font-weight" - "text-decoration" - "vertical-align"
     val restMap: Map[String, String] = if (otherStyles.isEmpty) { otherAttrs } else {
       otherAttrs + (("style", otherStyles.toList.map(x => x._1 + ":" + x._2).mkString("", ";", "")))
@@ -712,54 +722,61 @@ object XHTMLProcessor extends Logging {
 
   private def applySeqTo[T](v0: T)(fs: Seq[T => T]) = applySeq(fs)(v0)
 
-  private def pipelineXHTML(xhtml: Elem): List[Node] = {
-    
+  private def pipelineXHTML(xhtml: Elem, dropStrikethrough: Boolean = true): List[Node] = {
+
     def debug(where: String): List[Node] => List[Node] = (l: List[Node]) => {
       println("debug: " + where + ":")
-      l.zipWithIndex foreach { 
+      l.zipWithIndex foreach {
         case (n,i) =>
           println("  [%20s][%06d]: %s ".format(where,i,n.toString) )
-      }      
+      }
       l
     }
-    
+
     val xhtml2 = renameHeadings(List(xhtml)).collect { case e : Elem => e }.head
-    
+
     val baseElems = selectBaseElems(xhtml2)
-    
+
     val divs = chooseDivs(baseElems)
-       
+
     val validElems = explodeDivs(divs)
 
     val res = applySeqTo(validElems)(List[List[Node] => List[Node]](
       //debug("start"),
       cleanNameSpaces,
       //debug("after cleanNameSpaces"),
+      (if (dropStrikethrough) dropStrikethroughElems else id),
       cleanSeqNodes,
       //debug("after cleanSeqNodes"),
       _.flatMap(cleanAttributes),
       normalizeSpace,
-      cleanSpuriousSpans,      
+      cleanSpuriousSpans,
       mergeTextNodes,
       mergeSpans,
-      fixSpans, 
+      ((ns: List[Node]) => fixSpans(ns, dropStrikethrough)),
       cleanRepeatedEmptyParagraphs,
       cleanSpecialCharacters))
     res
   }
-  
-  def pipelineWithDefaultConverter(source: Array[Byte], mimeType: String) : Option[List[Node]] = 
-    pipeline(source,mimeType,defaultConverter)
-    
-  def pipeline(source: Array[Byte], mimeType: String, converter : Converter): Option[List[Node]] = 
-    convertSrcToXHTML(source, mimeType,converter).map(pipelineXHTML)
-  
 
-  def pipeline(rtfSource: InputStream,converter : Converter = defaultConverter): XHTMLProcessorResult =  
-    pipeline(IOUtils.toByteArray(rtfSource), "text/rtf",converter) match {
+  def pipelineWithDefaultConverter(source: Array[Byte], mimeType: String, dropStrikethrough: Boolean = true) : Option[List[Node]] =
+    pipeline(source, mimeType, defaultConverter(dropStrikethrough), dropStrikethrough)
+
+  def pipeline(source: Array[Byte], mimeType: String, converter : Converter, dropStrikethrough: Boolean): Option[List[Node]] =
+    convertSrcToXHTML(source, mimeType,converter).map(e => pipelineXHTML(e, dropStrikethrough))
+
+  def pipeline(source: Array[Byte], mimeType: String, converter : Converter): Option[List[Node]] =
+    pipeline(source, mimeType, converter, dropStrikethrough = true)
+
+
+  def pipeline(rtfSource: InputStream, converter : Converter): XHTMLProcessorResult =
+    pipeline(IOUtils.toByteArray(rtfSource), "text/rtf", converter) match {
       case None => Failure
       case Some(x) => Success(x)
     }
+
+  def pipeline(rtfSource: InputStream): XHTMLProcessorResult =
+    pipeline(rtfSource, defaultConverter())
   
 }
 

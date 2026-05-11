@@ -195,6 +195,86 @@ object DOCXReader {
   }
 
   /**
+   * Remove every <w:r>…</w:r> whose run properties carry an active
+   * <w:strike/> or <w:dstrike/> (toggle-aware: <w:val w:val="false"/> etc.
+   * disable). This must run BEFORE splitParAtSoftBreaks, because a single
+   * struck run can contain <w:br/>-separated text segments; splitting first
+   * would leave the post-break segments outside the run's <w:rPr> and let
+   * struck text leak into the output.
+   */
+  private def stripStruckRuns(evs : Seq[XMLEvent], dropStrikethrough : Boolean = true) : Seq[XMLEvent] = {
+    if (!dropStrikethrough) return evs
+
+    import scala.jdk.CollectionConverters._
+
+    def isW(ev : XMLEvent, lbl : String) : Boolean = ev match {
+      case se : StartElement => se.getName.getNamespaceURI == XElem.wNs && se.getName.getLocalPart == lbl
+      case ee : EndElement   => ee.getName.getNamespaceURI == XElem.wNs && ee.getName.getLocalPart == lbl
+      case _ => false
+    }
+
+    // Toggle attribute reader for <w:strike w:val="..."/>. Absent => enabled.
+    def strikeEnabled(se : StartElement) : Boolean = {
+      val v = se.getAttributes.asScala.collect { case a : Attribute => a }
+        .find(_.getName.getLocalPart == "val").map(_.getValue)
+      v match {
+        case Some("false") | Some("0") | Some("off") => false
+        case _ => true
+      }
+    }
+
+    // Pre-scan the slice of events inside a <w:r> to decide if the run is struck.
+    // We only inspect the run's *direct* <w:rPr>; <w:strike/> inside nested
+    // elements (e.g. inside <w:pPr><w:rPr>) cannot appear here because this
+    // slice is bounded by the run boundaries.
+    def runIsStruck(runEvs : Seq[XMLEvent]) : Boolean = {
+      var inRPr = false
+      var rPrDepth = 0
+      var depth = 0
+      var struck = false
+      val it = runEvs.iterator
+      while (it.hasNext && !struck) {
+        it.next() match {
+          case se : StartElement =>
+            depth += 1
+            val ns = se.getName.getNamespaceURI; val lp = se.getName.getLocalPart
+            if (ns == XElem.wNs && lp == "rPr") { inRPr = true; rPrDepth = depth }
+            else if (inRPr && ns == XElem.wNs && (lp == "strike" || lp == "dstrike"))
+              if (strikeEnabled(se)) struck = true
+          case ee : EndElement =>
+            if (inRPr && depth == rPrDepth) inRPr = false
+            depth -= 1
+          case _ => ()
+        }
+      }
+      struck
+    }
+
+    val out = scala.collection.mutable.ListBuffer[XMLEvent]()
+    val it = evs.iterator.buffered
+    while (it.hasNext) {
+      val ev = it.head
+      if (isW(ev, "r") && ev.isStartElement) {
+        // Buffer the full <w:r>…</w:r> slice.
+        val run = scala.collection.mutable.ListBuffer[XMLEvent](it.next())
+        var depth = 1
+        while (depth > 0 && it.hasNext) {
+          val nxt = it.next()
+          run += nxt
+          if (isW(nxt, "r")) {
+            if (nxt.isStartElement) depth += 1
+            else if (nxt.isEndElement) depth -= 1
+          }
+        }
+        if (!runIsStruck(run.toSeq)) out ++= run
+      } else {
+        out += it.next()
+      }
+    }
+    out.toSeq
+  }
+
+  /**
    * Split a single <w:p> event stream into one or more sub-streams, breaking
    * at each <w:br/> with type "line" (default), "page", or no type. <w:br
    * w:type="column"/> stays inline. Each returned slice contains no <w:br/>
@@ -279,7 +359,7 @@ object DOCXReader {
    *
    * The generated &lt;table&gt; has no id attribute — LexmlRenderer adds it.
    */
-  private def convertTable(tblEvents: Seq[XMLEvent]): scala.xml.Elem = {
+  private def convertTable(tblEvents: Seq[XMLEvent], dropStrikethrough : Boolean = true): scala.xml.Elem = {
     import scala.xml.{Elem => ScalaElem, MetaData, Node, Null => XmlNull,
                       Text, TopScope, UnprefixedAttribute}
     import scala.jdk.CollectionConverters._
@@ -330,7 +410,7 @@ object DOCXReader {
           // Collect all <w:p> inside the cell; concatenate their inline content
           val parContents: Seq[Seq[Node]] =
             collectElems(XElem.wNs, "p")(cellEvs)
-              .map(pEvs => collectText(pEvs).flatMap(_.toXML).toSeq)
+              .map(pEvs => collectText(stripStruckRuns(pEvs, dropStrikethrough)).flatMap(_.toXML).toSeq)
               .filter(_.nonEmpty)
               .toSeq
 
@@ -363,7 +443,7 @@ object DOCXReader {
   import java.io.InputStream
   import java.util.zip._
 
-  def readDOCX(s: InputStream): Option[scala.xml.Elem] = {
+  def readDOCX(s: InputStream, dropStrikethrough : Boolean = true): Option[scala.xml.Elem] = {
     val zis = new ZipInputStream(s)
     var entry = zis.getNextEntry
     while (entry != null && entry.getName != "word/document.xml") {
@@ -382,14 +462,14 @@ object DOCXReader {
 
       val nodes: LazyList[scala.xml.Elem] = bodyItems.flatMap {
         case ParItem(pEvs) =>
-          splitParAtSoftBreaks(pEvs).flatMap { subEvs =>
+          splitParAtSoftBreaks(stripStruckRuns(pEvs, dropStrikethrough)).flatMap { subEvs =>
             val segs = collectText(subEvs)
             if (segs.isEmpty) None
             else Some(<p>{ segs.flatMap(_.toXML) }</p>)
           }
 
         case TblItem(tblEvs) =>
-          Some(convertTable(tblEvs))
+          Some(convertTable(tblEvs, dropStrikethrough))
       }
 
       Some(<html><body>{ nodes }</body></html>)

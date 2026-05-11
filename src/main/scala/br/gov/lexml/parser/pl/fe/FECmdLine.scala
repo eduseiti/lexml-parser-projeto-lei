@@ -88,17 +88,18 @@ abstract sealed class Cmd
 
 case object CmdHelp extends Cmd
 
-case class CmdParse(    
+case class CmdParse(
     metadado : Metadado = Metadado(Lei,hashFonte = None),
     mimeType : String = "text/plain",
     input : SourceType = ST_Stdin,
     output : SinkType = SK_Stdout,
     linkerPath : Option[File] = None,
-    overrides : Option[OverridesData] = None,    
+    overrides : Option[OverridesData] = None,
     showInfo : Boolean = false,
     baseAutoridade : Option[String] = None,
     baseTipoNorma : Option[String] = None,
-    errorOutput : ErrorOutput = EO_Stderr) extends Cmd {
+    errorOutput : ErrorOutput = EO_Stderr,
+    keepStrikethrough : Boolean = false) extends Cmd {
   def changeOverrides(f : OverridesData => OverridesData): CmdParse = {
     val m = overrides.getOrElse(OverridesData())
     copy(overrides = Some(f(m)))
@@ -200,6 +201,10 @@ class FECmdLineOptionParser extends scopt.OptionParser[CmdLineOpts]("parser") {
             cmd.copy(errorOutput = EO_File(f))
           }
         },
+        opt[Unit]("keep-strikethrough").action { cmdParse { case (_,cmd) =>
+            cmd.copy(keepStrikethrough = true)
+          }
+        }.text("preserva texto com formatação tachada (strikethrough). Padrão: remove esse texto."),
         opt[Unit]("info"). action { cmdParse { case (_,cmd) =>
             cmd copy (showInfo = true)
           }
@@ -454,8 +459,9 @@ object FECmdLine {
             }
             cmd.output match {
               case SK_File(f) => println(s"    --output $f")
-              case _ => 
+              case _ =>
             }
+            if (cmd.keepStrikethrough) println("    --keep-strikethrough")
             println("Metadados:")
             println(s"    --tipo-norma ${md.urnFragTipoNorma}")
             println(s"    --autoridade ${md.urnFragAutoridade}")
@@ -491,7 +497,8 @@ object FECmdLine {
                 }
                 sys.props += ("lexml.linkertool" -> path1)
             }
-            process(profile,md,cmd.input,cmd.mimeType,cmd.output,cmd.linkerPath,verbose,cmd.errorOutput)
+            process(profile,md,cmd.input,cmd.mimeType,cmd.output,cmd.linkerPath,verbose,cmd.errorOutput,
+                    dropStrikethrough = !cmd.keepStrikethrough)
             Linker.system.terminate()
           }
         case CmdHelp => parser.showUsageAsError()
@@ -573,8 +580,9 @@ object FECmdLine {
   }
 
   def process(profile : DocumentProfile, md : Metadado, input : SourceType, mimeType : String, output : SinkType,
-              linkerPath : Option[File], verbose : Boolean, errorOutput : ErrorOutput): Unit = {
-    XHTMLProcessor.pipelineWithDefaultConverter(input.toByteArray, mimeType) foreach {
+              linkerPath : Option[File], verbose : Boolean, errorOutput : ErrorOutput,
+              dropStrikethrough : Boolean = true): Unit = {
+    XHTMLProcessor.pipelineWithDefaultConverter(input.toByteArray, mimeType, dropStrikethrough) foreach {
       xhtml =>
         val blocks = Block fromNodes xhtml
         val (mpl1, falhasValidacao) = new ProjetoLeiParser(profile).fromBlocks(md, blocks)
