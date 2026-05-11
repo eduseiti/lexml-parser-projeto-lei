@@ -2,12 +2,21 @@
 
 ## Status
 
-Implemented and verified on `decreto_2338_1997.docx`. A first pass had a
-subtle bug — strikethrough text leaked through whenever a struck `<w:r>`
-contained a soft line break (`<w:br/>`) — and was rewritten to filter
-struck *runs* (whole `<w:r>…</w:r>` slices) upstream of paragraph
-splitting. See "Pitfall encountered (v1)" below for the failure mode and
-why the fix has to live where it does.
+Implemented and verified on `decreto_2338_1997.docx`. Two issues were
+found and fixed during implementation:
+
+1. **v1 bug** — strikethrough text leaked through whenever a struck
+   `<w:r>` contained a soft line break (`<w:br/>`). Fixed by filtering
+   struck *runs* (whole `<w:r>…</w:r>` slices) upstream of paragraph
+   splitting. See "Pitfall encountered (v1)" below.
+
+2. **Linker recognition gap** (follow-on, see "Linker preprocessing"
+   section below) — after the v2 strikethrough fix, the in-force §1/§2
+   of art. 14, the §1 of art. 21, and several other dispositivos still
+   had unlinked references to other legal documents. Root cause: the
+   external `linkertool` (Haskell binary) does not recognise certain
+   Portuguese-language notations common in Brazilian legal text. Fixed
+   by normalising text on its way *to* the linker.
 
 ## Context
 
@@ -290,6 +299,100 @@ the decreto's short body:
    `<w:t>` text disappears while unstruck text remains and the
    paragraph mark's strike does not bleed into the unstruck run.
 
+## Linker preprocessing — recognise Portuguese citation notations
+
+Even after the strikethrough fix correctly removed amended text, the
+in-force amendment-citation tails ("(Redação dada pelo Decreto nº 4.037,
+de 29.11.2001)" and similar) on art14_par1, art14_par2, art21_par1 were
+not turned into `<span xlink:href="...">` references. The same was true
+of "Lei no. 8.977, de 1995" inside art17_cpt_inc42 (an inciso entirely
+unrelated to strikethrough). The missing links were therefore not a
+strikethrough regression — they were a pre-existing limitation of the
+external `linkertool` (Haskell binary) used by the parser.
+
+### Behaviour probed against the linker
+
+Sending each candidate string through `linkertool --hxml --xml
+--contexto=INLINE`:
+
+| Source notation | Linker recognises? |
+|---|---|
+| `Lei nº 9.472, de 1997` (year only) | ✓ |
+| `Decreto nº 4.037, de 29 de novembro de 2001` (long date) | ✓ |
+| `Decreto nº 4.037, de 29/11/2001` (slash date) | ✓ |
+| `Decreto nº 4.037, de 29.11.2001` (**dot date**) | ✗ |
+| `Lei n. 8.977, de 1995` / `Lei nº 8.977, de 1995` | ✓ |
+| `Lei no. 8.977, de 1995` (typewriter ordinal `no.`) | ✗ |
+| `Decreto nº 2.853, de 2/12/1998` | ✓ |
+| `Dec. 2.853, de 2/12/1998` (abbreviated `Dec.`) | ✗ |
+
+The linker is tolerant in some ways (year-only, hyphen-numbered MPs,
+mixed case months) but rejects: dot-separated dates, the `no.`
+typewriter ordinal, and the `Dec.` abbreviation.
+
+### Fix — normalise text before the linker call
+
+In `src/main/scala/br/gov/lexml/parser/pl/linker/Linker.scala`,
+`findLinks` now applies three small text rewrites to the `Seq[Node]` it
+receives *before* sending it to the actor, and reverses the
+date-rewrite on the linker's returned nodes:
+
+1. **`DD.MM.YYYY` → `DD/MM/YYYY`** before linking, then back
+   `DD/MM/YYYY` → `DD.MM.YYYY` after, so the visible LexML output
+   preserves the source's dot-date notation. Pure linker-recognition
+   aid; no visible-text change in the output.
+
+2. **`no. <digit>` → `nº <digit>`**. Not reversed — the typographically
+   correct ordinal sign appears in the output. Pattern is bounded by a
+   following whitespace + digit so it only matches the ordinal form,
+   not Portuguese preposition `no` followed by a sentence-ending
+   period.
+
+3. **`Dec. <digit>` → `Decreto <digit>`** (capital `Dec.` only).
+   Not reversed — the canonical/expanded form appears in the output.
+   Same digit-lookahead bound to avoid touching unrelated `dec.`
+   abbreviations.
+
+The rewrites are written as Scala regexes operating on `Text` nodes
+within the `scala.xml` tree (`rewriteTextNodes` walks the tree and
+replaces text content, leaving element structure alone).
+
+### Why this lives in the parser, not the linker
+
+The Haskell linker is a separate repository. Patching it requires a
+release cycle on that side. Normalising text on the parser side is
+contained, reversible (for dates), low-risk (regexes are tightly
+bounded), and ships immediately. If the linker later adds native
+support for these notations, the parser-side rewrites can be removed
+without changing the linker's contract.
+
+### Test plan for the linker fix
+
+Re-run the verbatim CLAUDE.md invocation on `decreto_2338_1997.docx`
+and verify each of the four user-flagged elements now contains an
+`xlink:href`:
+
+```bash
+for elem in 'art14_par1' 'art14_par2' 'art21_par1' 'art17_cpt_inc42'; do
+  echo "=== $elem ==="
+  awk "/id=\"$elem\"/,/<\\/(Paragrafo|Inciso)>/" \
+      ../novas_normas_20260420/teste_decreto/decreto_2338_1997.anexo1.xml | grep -c xlink:href
+done
+```
+
+Expected: each command prints at least 1.
+
+Also compare total link counts vs. the pre-fix output to confirm the
+fix doesn't only patch the example dispositivos but recovers links
+throughout the document:
+
+```bash
+grep -c xlink:href .../decreto_2338_1997.anexo1.xml          # NEW
+grep -c xlink:href .../lexml_manual_20260510/...anexo1.xml   # OLD
+```
+
+In the example document the count rose from 15 → 35.
+
 ## Critical files to modify
 
 - `src/main/scala/br/gov/lexml/parser/pl/docx/DOCXReader.scala`
@@ -321,6 +424,13 @@ the decreto's short body:
   - The previous `pipeline(InputStream, Converter)` and
     `pipeline(rtfSource: InputStream)` callers remain compilable via
     overloads (no source change in `ParserFrontEnd.scala`).
+- `src/main/scala/br/gov/lexml/parser/pl/linker/Linker.scala`
+  - `findLinks(urnContexto, ns)` now normalises text in `ns` before
+    sending it to the linker actor (`preprocess`: dot-date → slash-date,
+    `no.` → `nº`, `Dec.` → `Decreto`) and restores dot-dates on the
+    returned nodes (`restoreDates`).
+  - New helpers: `rewriteTextNodes`, `dotDateRe`, `slashDateRe`,
+    `numAbbrRe`, `decAbbrRe`, `preprocess`, `restoreDates`.
 - `src/main/scala/br/gov/lexml/parser/pl/fe/FECmdLine.scala`
   - `CmdParse` gains `keepStrikethrough : Boolean = false`.
   - `--keep-strikethrough` registered in scopt (under the `parse`
@@ -365,3 +475,11 @@ the decreto's short body:
 - **No formal test suite.** Verification is end-to-end via the CLI
   against the example document plus a no-strike regression doc. The
   duplicate-ID check (Test plan step 2) catches the v1 bug specifically.
+- **Linker preprocessing is a workaround, not a linker fix.** If the
+  external `linkertool` later learns to recognise dot-dates, `no.`,
+  and `Dec.` natively, the regexes in `Linker.scala` can be removed
+  without changing behaviour (the rewritten forms are still
+  recognisable). The reverse direction is also safe: more abbreviations
+  can be added to `preprocess` as new documents surface them. The two
+  patterns currently bound by `(?=\d)` lookahead (`no.` and `Dec.`)
+  must keep that bound to avoid corrupting unrelated text.

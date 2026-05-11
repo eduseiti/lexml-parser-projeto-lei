@@ -33,17 +33,66 @@ object Linker {
     supervisorStrategy = strategy)))
             
   
+  // The external linker (`linkertool`) rejects several Portuguese-language
+  // notations that are common in Brazilian legal text. We normalise text
+  // nodes before sending them to the linker, then undo the changes that
+  // would alter visible text in the output:
+  //
+  //   * `DD.MM.YYYY`  ↔  `DD/MM/YYYY`   (dot date → slash date, reversed
+  //     after linking; pure recognition aid).
+  //   * `no.`         →  `nº `          (typewriter ordinal "no." →
+  //     proper ordinal sign; not reversed, since the source's "no."
+  //     and "nº" mean the same thing and the typographically correct
+  //     form is preferred).
+  //   * `Dec.`        →  `Decreto`     (abbreviation expansion; not
+  //     reversed — expanded form is the canonical citation form).
+  //
+  // Date rewrites preserve the visible text. Abbreviation expansions
+  // intentionally change the visible text so the canonical/expanded
+  // form is what appears in the LexML output.
+  private val dotDateRe   = """\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b""".r
+  private val slashDateRe = """\b(\d{1,2})/(\d{1,2})/(\d{4})\b""".r
+
+  // "no." followed by whitespace and a digit → "nº " (handles "Lei no. 9.472").
+  private val numAbbrRe = """\bno\.(\s+)(?=\d)""".r
+  // Standalone "Dec." (followed by whitespace and a digit) → "Decreto".
+  // Bounded by digit lookahead to avoid touching unrelated "dec." occurrences
+  // (Portuguese for "ten" or end-of-sentence abbreviations).
+  private val decAbbrRe = """\bDec\.(\s+)(?=\d)""".r
+
+  private def rewriteTextNodes(ns : Seq[Node], f : String => String) : Seq[Node] = {
+    def rewrite(n : Node) : Node = n match {
+      case Text(t) => Text(f(t))
+      case e : Elem => e.copy(child = e.child.map(rewrite))
+      case other => other
+    }
+    ns.map(rewrite)
+  }
+
+  private def preprocess(s : String) : String = {
+    val s1 = dotDateRe.replaceAllIn(s, "$1/$2/$3")
+    val s2 = numAbbrRe.replaceAllIn(s1, "nº$1")
+    val s3 = decAbbrRe.replaceAllIn(s2, "Decreto$1")
+    s3
+  }
+
+  private def restoreDates(s : String) : String =
+    slashDateRe.replaceAllIn(s, "$1.$2.$3")
+
   def findLinks(urnContexto : String, ns : Seq[Node]) : (List[String],List[Node]) = {
     logger.info(s"findLinks: urnContexto = $urnContexto, ns=$ns")
     import org.apache.pekko.util.Timeout
     implicit val timeout : Timeout = Timeout(linkerProcessTimeout.seconds)
-    val msg = (urnContexto,ns)
+    val nsRewritten = rewriteTextNodes(ns, preprocess)
+    val msg = (urnContexto, nsRewritten)
     import system.dispatcher
     val f = (linkerRouter ? msg).mapTo[(List[Node],Set[String])] map {
       case (nl,links) => (links.toList,nl)
     }
     logger.info(s"findLinks: waiting for result....")
-    val res = Await.result(f,timeout.duration)
+    val (links, nl) = Await.result(f,timeout.duration)
+    val nlRestored = rewriteTextNodes(nl, restoreDates).toList
+    val res = (links, nlRestored)
     logger.info(s"findLinks: result = $res")
     res
   }
