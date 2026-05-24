@@ -10,6 +10,7 @@ natively supported.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -63,26 +64,55 @@ RULES: list[tuple[tuple[str, ...], str, str]] = [
 ]
 
 # Filenames starting with `res_<agency>` (e.g. `res_anatel_*`) are regulatory-
-# agency resolutions. The parser has no registered profile for
-# (autoridade=federal, tipoNorma=resolucao), so we route them through the
+# agency resolutions. The parser has no registered profile for these
+# (autoridade=<agency-urn>, tipoNorma=resolucao), so we route them through the
 # fallback profile (Lei) plus the runtime overrides in PROFILE_OVERRIDES.
+# The `<agency>` token (e.g. "anpd") is mapped to its LexML authority URN
+# fragment via the agency-authority map loaded from AGENCY_AUTHORITY_MAP_FILE;
+# unmapped agencies are skipped so we never emit a wrong "federal" authority.
 AGENCY_RESOLUTION_PREFIX = "res"
 AGENCY_LEGISLATIVE_TOKENS = frozenset({"senado", "camara", "congresso"})
 
-# Extra CLI flags appended when the detected (autoridade, tipoNorma) tuple
-# isn't backed by a registered DocumentProfile and the parser needs runtime
-# overrides to teach the fallback profile (Lei) about the actual epigraph
-# format. The pos-epigrafe regex skips Anatel website boilerplate that sits
-# between the epigraph and the ementa; it's harmless on docs without those
-# lines (no match → no skip).
-PROFILE_OVERRIDES: dict[tuple[str, str], list[str]] = {
-    ("federal", "resolucao"): [
+# Default location of the JSON file mapping a lowercased/accent-folded agency
+# acronym to its LexML authority URN fragment, e.g.
+# {"anpd": "agencia.nacional.protecao.dados"}. Overridable with
+# --agency-authority-map.
+AGENCY_AUTHORITY_MAP_FILE = Path(__file__).resolve().parent / "agency_authority.json"
+
+# Extra CLI flags appended for agency resolutions (det.agency set), whose
+# (authority, resolucao) pair has no registered DocumentProfile: they fall back
+# to the Lei profile and need these runtime overrides to recognize the actual
+# epigraph format. Keyed on tipoNorma because agency resolutions share the same
+# epigraph shape regardless of which agency issued them. NOT applied to
+# legislative resolutions (res_senado/camara/congresso), which have registered
+# profiles and reach the parser via the RULES engine (det.agency is None
+# there). The pos-epigrafe regex skips Anatel website boilerplate between the
+# epigraph and the ementa; it's harmless on docs without those lines (no
+# match → no skip).
+PROFILE_OVERRIDES: dict[str, list[str]] = {
+    "resolucao": [
         "--prof-regex-epigrafe", "^resolucao",
         "--prof-regex-epigrafe-continuacao", r"^resolucao%^n[oº°˚]",
         "--prof-regex-pos-epigrafe", r"^publicado:%^left\d%^acessos:",
         "--prof-epigrafe-head", "RESOLUÇÃO",
     ],
 }
+
+
+def load_agency_authority_map(path: Path, required: bool) -> dict[str, str]:
+    """Load the agency-acronym → authority-URN-fragment map from JSON.
+
+    Keys are accent-folded and lowercased to match `tokenize()` output. When
+    `required` is False (the default file) a missing file yields an empty map so
+    the script still runs; when True (an explicit --agency-authority-map) a
+    missing file is a hard error handled by the caller.
+    """
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(path)
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {strip_accents(k).lower(): str(v) for k, v in raw.items()}
 
 
 @dataclass
@@ -117,12 +147,19 @@ PT_MONTHS = {
 # Anchored at start of string (with optional leading whitespace) so that
 # ementa lines mentioning other laws don't produce false matches.
 # Accent-folded, lowercased, NBSP-normalized input is expected.
+#
+# Regulatory-agency resolutions carry an agency segment between the type
+# keyword and "nº", e.g. "RESOLUÇÃO CD/ANPD Nº 4, DE 24 DE FEVEREIRO DE 2023".
+# The optional `(?:\s+[a-z][a-z./-]*)?` group absorbs that single short token
+# (letters plus `. / -`); it is non-capturing and bounded so it cannot swallow
+# ementa text.
 _EPIGRAFE_RE = re.compile(
     r"^\s*"
     r"(?:lei\s+complementar|lei\s+delegada|"
     r"decreto[-\s]lei|decreto[-\s]legislativo|"
     r"medida\s+provisoria|emenda\s+constitucional|"
     r"constituicao|resolucao|lei|decreto)"
+    r"(?:\s+[a-z][a-z./-]*)?"
     r"\s*n[o°º]?\s*"
     r"([\d\.]+)"
     r"[^0-9a-z]+de\s+(\d{1,2})[oa°º]?\s+de\s+([a-z]+)\s+de\s+(\d{4})"
@@ -180,22 +217,33 @@ def tokenize(stem: str) -> list[str]:
     return [t for t in re.split(r"[\s_\-]+", folded) if t]
 
 
-def detect(stem: str) -> Detection:
+def detect(stem: str, agency_map: dict[str, str] | None = None) -> Detection:
+    agency_map = agency_map or {}
     tokens = tokenize(stem)
     if not tokens:
         return Detection(skip_reason="Empty filename")
 
-    # Agency-resolution special case: `res_<agency>_...`. Route to the
-    # (federal, resolucao) fallback profile + PROFILE_OVERRIDES. Legislative
-    # variants (res_senado / res_camara / res_congresso) fall through to the
-    # general RULES engine below.
+    # Agency-resolution special case: `res_<agency>_...`. The `<agency>` token
+    # is mapped to its LexML authority URN fragment via `agency_map`; the doc is
+    # then routed through the (Lei) fallback profile + PROFILE_OVERRIDES. An
+    # agency missing from the map is skipped rather than mislabelled "federal".
+    # Legislative variants (res_senado / res_camara / res_congresso) fall
+    # through to the general RULES engine below.
     if (tokens[0] == AGENCY_RESOLUTION_PREFIX
             and len(tokens) >= 2
             and tokens[1] not in AGENCY_LEGISLATIVE_TOKENS):
+        agency = tokens[1]
+        autoridade = agency_map.get(agency)
+        if autoridade is None:
+            return Detection(
+                agency=agency,
+                skip_reason=f"Unmapped agency acronym: {agency} "
+                            f"(add it to the agency-authority map)",
+            )
         det = Detection(
-            autoridade="federal",
+            autoridade=autoridade,
             tipo_norma="resolucao",
-            agency=tokens[1],
+            agency=agency,
         )
         # Skip the `res` + `<agency>` tokens when scanning for numero/ano/data.
         matched_len = 2
@@ -275,15 +323,18 @@ def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
         args += ["--data", det.data]
     elif det.ano:
         args += ["--ano", det.ano]
-    args += PROFILE_OVERRIDES.get((det.autoridade or "", det.tipo_norma or ""), [])
+    # Overrides apply only to agency resolutions (det.agency set), never to
+    # legislative resolutions, which have registered profiles.
+    if det.agency:
+        args += PROFILE_OVERRIDES.get(det.tipo_norma or "", [])
     if linker is not None:
         args += ["--linker", str(linker)]
     return args
 
 
 def process_file(docx: Path, out_dir: Path, jar: Path, dry_run: bool,
-                 linker: Path | None) -> Outcome:
-    det = detect(docx.stem)
+                 linker: Path | None, agency_map: dict[str, str]) -> Outcome:
+    det = detect(docx.stem, agency_map)
     if det.skip_reason is not None:
         return Outcome(path=docx, status="skipped", detection=det,
                        detail=det.skip_reason)
@@ -373,12 +424,33 @@ def main() -> int:
                     help="Path to the linker executable (forwarded to the "
                          "parser's --linker flag). If omitted, the linker "
                          "is skipped.")
+    ap.add_argument("--agency-authority-map", type=Path, default=None,
+                    help="Path to a JSON file mapping regulatory-agency "
+                         "acronyms (e.g. \"anpd\") to their LexML authority URN "
+                         f"fragment. Defaults to {AGENCY_AUTHORITY_MAP_FILE.name} "
+                         "next to this script. Agencies absent from the map are "
+                         "skipped.")
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     if args.linker is not None and not args.linker.exists():
         print(f"error: --linker path not found: {args.linker}", file=sys.stderr)
+        return 2
+
+    # Explicit --agency-authority-map must exist; the default file may be absent
+    # (then the map is empty and all agency resolutions are skipped).
+    map_path = args.agency_authority_map or AGENCY_AUTHORITY_MAP_FILE
+    map_required = args.agency_authority_map is not None
+    try:
+        agency_map = load_agency_authority_map(map_path, required=map_required)
+    except FileNotFoundError:
+        print(f"error: --agency-authority-map path not found: {map_path}",
+              file=sys.stderr)
+        return 2
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"error: could not read agency-authority map {map_path}: {e}",
+              file=sys.stderr)
         return 2
 
     if not args.input_dir.is_dir():
@@ -406,7 +478,8 @@ def main() -> int:
 
     outcomes: list[Outcome] = []
     for docx in docx_files:
-        o = process_file(docx, args.output_dir, jar, args.dry_run, args.linker)
+        o = process_file(docx, args.output_dir, jar, args.dry_run, args.linker,
+                         agency_map)
         outcomes.append(o)
         tag = {"converted": "OK  ", "skipped": "SKIP", "failed": "FAIL"}[o.status]
         extra = ""
