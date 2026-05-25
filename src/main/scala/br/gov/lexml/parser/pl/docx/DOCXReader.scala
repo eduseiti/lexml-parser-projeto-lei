@@ -185,8 +185,19 @@ object DOCXReader {
           case _ => ctx.leave()
         }
       case (ev : Characters,_) =>
-        val brokenText = breakText(ctx.style,ev.getData)
-        ctx.add(brokenText:_*)
+        // Skip character data inside Word complex-field instruction elements
+        // (<w:instrText>, and its tracked-change variant <w:delInstrText>):
+        // these carry field codes like ` HYPERLINK "..." \l "art5"`, not
+        // document text. The visible text of a hyperlink field is a separate
+        // <w:t> run after <w:fldChar w:fldCharType="separate"/> and is kept.
+        ctx.head match {
+          case Some(e) if e.ns == Some(XElem.wNs) &&
+                          (e.label == "instrText" || e.label == "delInstrText") =>
+            ctx
+          case _ =>
+            val brokenText = breakText(ctx.style,ev.getData)
+            ctx.add(brokenText:_*)
+        }
       case (ev : EntityReference,_) =>
         br.gov.lexml.parser.pl.util.Entities.entities.get(ev.getName).
           map(c => ctx.add(breakText(ctx.style,"" + c):_*)).getOrElse(ctx)

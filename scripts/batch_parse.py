@@ -86,14 +86,30 @@ AGENCY_AUTHORITY_MAP_FILE = Path(__file__).resolve().parent / "agency_authority.
 # epigraph shape regardless of which agency issued them. NOT applied to
 # legislative resolutions (res_senado/camara/congresso), which have registered
 # profiles and reach the parser via the RULES engine (det.agency is None
-# there). The pos-epigrafe regex skips Anatel website boilerplate between the
-# epigraph and the ementa; it's harmless on docs without those lines (no
-# match → no skip).
+# there).
+#
+# Regexes here are matched against the parser's normalized text (NFD,
+# diacritics stripped, lowercased), so they are written lowercase and without
+# accents — e.g. `^observacao` matches "Observação:".
+#
+# - pos-epigrafe skips website-export boilerplate that sits between the
+#   epigraph and the ementa, AND editorial annotations interleaved with the
+#   ementa itself ("Prazos ... prorrogados conforme o Acórdão ...", "Observação:
+#   Este texto não substitui ..."). ProjetoLei.fromBlocks filters every
+#   pos-epigrafe match out of the ementa region, not just the leading ones, so
+#   an annotation following the real ementa sentence is also dropped. Harmless
+#   on docs without those lines (no match → no skip).
+# - preambulo recognizes the regulatory-agency opener "O CONSELHO DIRETOR DA
+#   <agency>, ..."; the default profile only knows the legislative openers
+#   ("O Congresso Nacional ...", "O Presidente da República ..."). Kept broad
+#   (`^o conselho diretor`) so it matches every agency that opens this way
+#   (Anatel, ANPD, ANEEL, ...), not just Anatel.
 PROFILE_OVERRIDES: dict[str, list[str]] = {
     "resolucao": [
         "--prof-regex-epigrafe", "^resolucao",
         "--prof-regex-epigrafe-continuacao", r"^resolucao%^n[oº°˚]",
-        "--prof-regex-pos-epigrafe", r"^publicado:%^left\d%^acessos:",
+        "--prof-regex-pos-epigrafe", r"^publicado:%^left\d%^acessos:%^prazos%^observacao",
+        "--prof-regex-preambulo", "^o conselho diretor",
         "--prof-epigrafe-head", "RESOLUÇÃO",
     ],
 }

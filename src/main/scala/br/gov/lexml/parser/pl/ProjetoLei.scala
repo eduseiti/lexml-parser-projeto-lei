@@ -419,7 +419,14 @@ class ProjetoLeiParser(profile: DocumentProfile) extends Logging {
           }
         }
       }
-      val (ementa1, preambulo, posPreambulo) = reconhecePreambulo(posEpigrafe)
+      val (ementa1Raw, preambulo, posPreambulo) = reconhecePreambulo(posEpigrafe)
+      // Drop pos-epígrafe annotations (e.g. website-export "Publicado:",
+      // "Prazos ...", "Observação ...") anywhere in the ementa region, not
+      // just leading ones. spanEpigrafe only strips them from the *front* of
+      // the post-epígrafe blocks via dropWhile; an annotation that follows the
+      // real ementa sentence would otherwise be joined into the ementa.
+      val isPosEpigrafe = matchesOneOf(profile.regexPosEpigrafe)
+      val ementa1 = ementa1Raw.filterNot(isPosEpigrafe)
       val ementa2 = trimEmptyPars(ementa1)
       val ementa = if (
             ementa2.isEmpty ||

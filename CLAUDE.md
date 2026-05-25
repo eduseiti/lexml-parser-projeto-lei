@@ -50,7 +50,8 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-one
    -t resolucao \
    --prof-regex-epigrafe '^resolucao' \
    --prof-regex-epigrafe-continuacao '^resolucao%^n[oº°˚]' \
-   --prof-regex-pos-epigrafe '^publicado:%^left\d%^acessos:' \
+   --prof-regex-pos-epigrafe '^publicado:%^left\d%^acessos:%^prazos%^observacao' \
+   --prof-regex-preambulo '^o conselho diretor' \
    --prof-epigrafe-head 'RESOLUÇÃO' \
    --linker /usr/local/bin/linkertool
 ```
