@@ -69,6 +69,22 @@ object Linker {
     ns.map(rewrite)
   }
 
+  // Presentational inline elements whose tags often don't align with word
+  // boundaries in source DOCX (e.g. `<i>capu</i>t`, `<i>caput</i><b>,</b>`).
+  // When such a tag overlaps a citation, the external linker re-tokenises the
+  // span and emits unbalanced markup that crashes the result parser. Flattening
+  // these elements to their text content before linking sidesteps the bug while
+  // still letting the citation be recognised. The inline styling is dropped from
+  // the linked output, which is acceptable for reference text.
+  private val inlineFormatTags = Set("i", "b", "em", "strong")
+
+  private def flattenInlineFormat(ns : Seq[Node]) : Seq[Node] =
+    ns.flatMap {
+      case e : Elem if inlineFormatTags.contains(e.label) => flattenInlineFormat(e.child)
+      case e : Elem => Seq(e.copy(child = flattenInlineFormat(e.child)))
+      case other => Seq(other)
+    }
+
   private def preprocess(s : String) : String = {
     val s1 = dotDateRe.replaceAllIn(s, "$1/$2/$3")
     val s2 = numAbbrRe.replaceAllIn(s1, "nº$1")
@@ -83,7 +99,7 @@ object Linker {
     logger.info(s"findLinks: urnContexto = $urnContexto, ns=$ns")
     import org.apache.pekko.util.Timeout
     implicit val timeout : Timeout = Timeout(linkerProcessTimeout.seconds)
-    val nsRewritten = rewriteTextNodes(ns, preprocess)
+    val nsRewritten = flattenInlineFormat(rewriteTextNodes(ns, preprocess))
     val msg = (urnContexto, nsRewritten)
     import system.dispatcher
     val f = (linkerRouter ? msg).mapTo[(List[Node],Set[String])] map {

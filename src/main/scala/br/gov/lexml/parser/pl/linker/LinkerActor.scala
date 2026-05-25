@@ -60,31 +60,43 @@ class LinkerActor extends Actor {
       oprocess match {
         case Some(p) =>
           log.debug("receive: oprocess is defined")
-          val msgTxt = (NodeSeq fromSeq msg).toString
-          p.writer.println(urnContexto)
-          p.writer.println(msgTxt)
-          p.writer.println("###LEXML-END###")
-          p.writer.flush()
-          log.debug("receive: output to linker process sent")
-          val res = {
-            val b = new StringBuilder()
-            var line = p.reader.readLine()
-            while (line != null && line != "###LEXML-END###") {
-              b ++= line
-              b ++= System.lineSeparator()
-              line = p.reader.readLine()
+          try {
+            val msgTxt = (NodeSeq fromSeq msg).toString
+            p.writer.println(urnContexto)
+            p.writer.println(msgTxt)
+            p.writer.println("###LEXML-END###")
+            p.writer.flush()
+            log.debug("receive: output to linker process sent")
+            val res = {
+              val b = new StringBuilder()
+              var line = p.reader.readLine()
+              while (line != null && line != "###LEXML-END###") {
+                b ++= line
+                b ++= System.lineSeparator()
+                line = p.reader.readLine()
+              }
+              if(line == null) {
+                throw new LinkerActorException("Connection to linker process down!")
+              }
+              b.toString()
             }
-            if(line == null) {
-              throw new LinkerActorException("Connection to linker process down!")
-            }
-            b.toString()
+            log.debug(s"receive: result from linker: $res")
+            val r = XhtmlParser(Source.fromString("<result>" + res + "</result>")).head.asInstanceOf[Elem]
+            log.debug(s"parsed result: $r")
+            val links: Set[String] = (r \\ "span").collect({ case (e: Elem) => e.attributes.find(_.prefixedKey == "xlink:href").map(_.value.text) }).flatten.toSet
+            log.debug(s"links found: $links")
+            sender() ! ((r.child.toList, links))
+          } catch {
+            // The external linker can emit unbalanced markup (e.g. an <i> with
+            // no matching </i>) when an inline-format run overlaps a citation it
+            // recognises, which makes XhtmlParser throw a FatalError. Rather than
+            // letting the actor die — which strands the pending ask future and
+            // times out the whole document parse — degrade gracefully to the
+            // original, unlinked input for this fragment.
+            case ex: Throwable =>
+              log.warning("receive: linker round-trip failed; returning input unlinked: {}", ex.getMessage)
+              sender() ! ((msg, Set()))
           }
-          log.debug(s"receive: result from linker: $res")
-          val r = XhtmlParser(Source.fromString("<result>" + res + "</result>")).head.asInstanceOf[Elem]
-          log.debug(s"parsed result: $r")
-          val links: Set[String] = (r \\ "span").collect({ case (e: Elem) => e.attributes.find(_.prefixedKey == "xlink:href").map(_.value.text) }).flatten.toSet
-          log.debug(s"links found: $links")
-          sender() ! ((r.child.toList, links))
         case None =>
           log.warning("receive: no oprocess found! returning input with empty set of links!")
           sender() ! ((msg,Set()))
