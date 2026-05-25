@@ -55,6 +55,61 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-one
    --linker /usr/local/bin/linkertool
 ```
 
+## Helper scripts (`scripts/`)
+
+Two Python 3 helpers automate the bulk steps that bookend the Scala parser:
+turning a folder of DOCX into LexML XML, then turning that XML into segmentation
+CSVs. Run both from the repo root with `LC_ALL=C.UTF-8 LANG=C.UTF-8`.
+
+### `batch_parse.py` — DOCX folder → LexML XML
+
+Walks an input folder, infers each document's Brazilian-law profile from its
+filename (e.g. `decreto_*`, `res_<agency>_*`), and invokes the onejar with the
+matching `-a`/`-t` flags. Agencies for `res_*` files are resolved via
+`scripts/agency_authority.json` (acronym → authority URN fragment); documents
+whose type/agency isn't supported are skipped and listed in a report. Only the
+onejar is required (no extra pip deps).
+
+```bash
+LC_ALL=C.UTF-8 LANG=C.UTF-8 python3 scripts/batch_parse.py \
+   ../novas_normas_20260420/manual_20260421 \
+   ../novas_normas_20260420/lexml_manual_20260524 \
+   --linker /usr/local/bin/linkertool
+```
+
+- Positional args: `input_dir`, `output_dir`.
+- `--jar` defaults to the highest-versioned jar under `target/`.
+- `--linker` is optional; omit it to skip link recognition.
+- `--agency-authority-map` defaults to `scripts/agency_authority.json`.
+- `--recursive` to descend into subfolders; `--dry-run` to print the planned
+  invocations without running the parser.
+
+### `run_segmentation_csv.py` — LexML XML folder → segmentation CSVs
+
+Applies `scripts/GeraCSVporArtigoPorAgrupador.xsl` to every LexML `.xml` in a
+folder, producing one CSV of dispositivos per document (columns
+`Tipo,Rotulo,Num_Inicio,Num_Final,Texto,urn`). A document split across a main
+file plus `.anexoN` siblings is grouped by stem into a subfolder
+(`<out>/<stem>/...`); standalone documents get a flat `<out>/<stem>.csv`.
+`*.err.log` and `*.txt` inputs are ignored. A `segmentation_report.{json,md}`
+with per-document status and the overall success rate is written into the
+output folder; exit code is non-zero if any document fails.
+
+The stylesheet is **XSLT 3.0**, which `lxml` (XSLT 1.0 only) cannot run, so the
+script drives SaxonC-HE via the `saxonche` package — install it once with
+`pip install saxonche`.
+
+```bash
+LC_ALL=C.UTF-8 LANG=C.UTF-8 python3 scripts/run_segmentation_csv.py \
+   --input-dir  ../novas_normas_20260420/lexml_manual_20260524 \
+   --output-dir ../novas_normas_20260420/lexml_manual_20260524/segmentation
+```
+
+- `--input-dir` / `--output-dir` are required; the output folder is created.
+- `--xsl` defaults to `scripts/GeraCSVporArtigoPorAgrupador.xsl`.
+- `--recursive` to descend into subfolders; `--overwrite` to regenerate CSVs
+  that already exist (otherwise they're skipped).
+
 ## Architecture
 
 Source lives under `src/main/scala/br/gov/lexml/parser/pl/`. The parsing pipeline flows through:
