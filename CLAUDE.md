@@ -110,6 +110,13 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 python3 scripts/run_segmentation_csv.py \
 - `--recursive` to descend into subfolders; `--overwrite` to regenerate CSVs
   that already exist (otherwise they're skipped).
 
+## Work history (`work_history/`)
+
+`work_history/` holds dated `.md` notes (named
+`<YYYYMMDD>_<HHMMSS>_<slug>.md`) documenting past fixes and implementation
+plans. Whenever the user refers to a previous fix or implementation, check this
+folder for the relevant note before answering or making changes.
+
 ## Architecture
 
 Source lives under `src/main/scala/br/gov/lexml/parser/pl/`. The parsing pipeline flows through:
