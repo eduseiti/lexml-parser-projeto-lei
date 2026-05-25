@@ -117,6 +117,10 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 python3 scripts/run_segmentation_csv.py \
 plans. Whenever the user refers to a previous fix or implementation, check this
 folder for the relevant note before answering or making changes.
 
+**IMPORTANT:** Any `.md` file created inside `work_history/` must be prefixed
+with a `YYYYMMDD_HHMMSS_` timestamp (e.g. `20260525_143000_<slug>.md`). Use the
+current date and time when creating the note.
+
 ## Architecture
 
 Source lives under `src/main/scala/br/gov/lexml/parser/pl/`. The parsing pipeline flows through:
