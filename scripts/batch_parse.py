@@ -63,14 +63,19 @@ RULES: list[tuple[tuple[str, ...], str, str]] = [
     (("decreto",), "federal", "decreto"),
 ]
 
-# Filenames starting with `res_<agency>` (e.g. `res_anatel_*`) are regulatory-
-# agency resolutions. The parser has no registered profile for these
-# (autoridade=<agency-urn>, tipoNorma=resolucao), so we route them through the
-# fallback profile (Lei) plus the runtime overrides in PROFILE_OVERRIDES.
-# The `<agency>` token (e.g. "anpd") is mapped to its LexML authority URN
+# Filenames whose second token is a regulatory/ministerial AGENCY acronym
+# (e.g. `res_anatel_*`, `portaria_mjsp_*`) rather than a fixed authority. The
+# parser has no registered profile keyed on (autoridade=<agency-urn>, tipoNorma),
+# so we route them through the fallback profile (Lei) plus the runtime overrides
+# in PROFILE_OVERRIDES. The leading token selects the tipoNorma:
+#   res_<agency>      -> resolucao   (regulatory-agency resolution)
+#   portaria_<agency> -> portaria    (ministerial order)
+# The `<agency>` token (e.g. "anpd", "mjsp") is mapped to its LexML authority URN
 # fragment via the agency-authority map loaded from AGENCY_AUTHORITY_MAP_FILE;
 # unmapped agencies are skipped so we never emit a wrong "federal" authority.
-AGENCY_RESOLUTION_PREFIX = "res"
+AGENCY_PREFIX_TIPONORMA = {"res": "resolucao", "portaria": "portaria"}
+# For `res_*`, these second tokens are legislative bodies with registered
+# profiles (not agencies), so they fall through to the general RULES engine.
 AGENCY_LEGISLATIVE_TOKENS = frozenset({"senado", "camara", "congresso"})
 
 # Default location of the JSON file mapping a lowercased/accent-folded agency
@@ -79,14 +84,21 @@ AGENCY_LEGISLATIVE_TOKENS = frozenset({"senado", "camara", "congresso"})
 # --agency-authority-map.
 AGENCY_AUTHORITY_MAP_FILE = Path(__file__).resolve().parent / "agency_authority.json"
 
-# Extra CLI flags appended for agency resolutions (det.agency set), whose
-# (authority, resolucao) pair has no registered DocumentProfile: they fall back
+# Extra CLI flags appended for agency documents (det.agency set), whose
+# (authority, tipoNorma) pair has no registered DocumentProfile: they fall back
 # to the Lei profile and need these runtime overrides to recognize the actual
-# epigraph format. Keyed on tipoNorma because agency resolutions share the same
-# epigraph shape regardless of which agency issued them. NOT applied to
-# legislative resolutions (res_senado/camara/congresso), which have registered
-# profiles and reach the parser via the RULES engine (det.agency is None
-# there).
+# epigraph format. Keyed on tipoNorma because agency documents of a given kind
+# share the same epigraph shape regardless of which agency issued them. NOT
+# applied to legislative resolutions (res_senado/camara/congresso), which have
+# registered profiles and reach the parser via the RULES engine (det.agency is
+# None there).
+#
+# Each entry mirrors the corresponding native Scala profile in
+# DocumentProfile.scala (ResolucaoProfile / PortariaProfile); keep them in sync.
+# The native profile is registered under a single fixed authority (e.g.
+# "federal" for Portaria), so `-a federal -t portaria` works with no flags, but
+# the per-agency authority URN misses the registry and falls back to Lei — hence
+# these overrides carry the rules onto that authority at runtime.
 #
 # Regexes here are matched against the parser's normalized text (NFD,
 # diacritics stripped, lowercased), so they are written lowercase and without
@@ -99,11 +111,20 @@ AGENCY_AUTHORITY_MAP_FILE = Path(__file__).resolve().parent / "agency_authority.
 #   pos-epigrafe match out of the ementa region, not just the leading ones, so
 #   an annotation following the real ementa sentence is also dropped. Harmless
 #   on docs without those lines (no match → no skip).
-# - preambulo recognizes the regulatory-agency opener "O CONSELHO DIRETOR DA
-#   <agency>, ..."; the default profile only knows the legislative openers
-#   ("O Congresso Nacional ...", "O Presidente da República ..."). Kept broad
-#   (`^o conselho diretor`) so it matches every agency that opens this way
-#   (Anatel, ANPD, ANEEL, ...), not just Anatel.
+# - preambulo recognizes the issuer's opener — for resolucao the regulatory-
+#   agency "O CONSELHO DIRETOR DA <agency>, ...", for portaria the ministerial
+#   "O MINISTRO DE ESTADO ..." / "A MINISTRA DE ESTADO ...". The default profile
+#   only knows the legislative openers ("O Congresso Nacional ...", "O Presidente
+#   da República ..."). Kept broad so they match every issuer of that kind
+#   (Anatel/ANPD/ANEEL... for resolucao; any ministry for portaria).
+# - portaria pos-epigrafe skips the Diário Oficial da União header lines
+#   ("Diário Oficial da União", "Publicado em: ...", "Órgão: ...", "Edição ...",
+#   "Seção ...") that precede the epigraph and the ementa.
+#
+# Override semantics gotcha: DocumentProfileOverride REPLACES (does not append
+# to) the base list, so each value must be self-contained — e.g. the
+# epigrafe-continuacao must list both `^<tipo>` and `^n[oº°˚]` since the Lei
+# base's `^(n[oº°˚]|complementar)` continuation is lost when overridden.
 PROFILE_OVERRIDES: dict[str, list[str]] = {
     "resolucao": [
         "--prof-regex-epigrafe", "^resolucao",
@@ -111,6 +132,13 @@ PROFILE_OVERRIDES: dict[str, list[str]] = {
         "--prof-regex-pos-epigrafe", r"^publicado:%^left\d%^acessos:%^prazos%^observacao",
         "--prof-regex-preambulo", "^o conselho diretor",
         "--prof-epigrafe-head", "RESOLUÇÃO",
+    ],
+    "portaria": [
+        "--prof-regex-epigrafe", "^portaria",
+        "--prof-regex-epigrafe-continuacao", r"^portaria%^n[oº°˚]",
+        "--prof-regex-pos-epigrafe", r"^diario oficial%^publicado em%^orgao:%^edicao%^secao",
+        "--prof-regex-preambulo", r"^o ministro de estado%^a ministra de estado",
+        "--prof-epigrafe-head", "PORTARIA",
     ],
 }
 
@@ -138,7 +166,7 @@ class Detection:
     numero: str | None = None
     data: str | None = None  # YYYY-MM-DD
     ano: str | None = None   # YYYY
-    agency: str | None = None  # set for `res_<agency>_*` filenames
+    agency: str | None = None  # set for agency filenames (`res_<agency>_*`, `portaria_<agency>_*`)
     skip_reason: str | None = None
 
 
@@ -174,7 +202,7 @@ _EPIGRAFE_RE = re.compile(
     r"(?:lei\s+complementar|lei\s+delegada|"
     r"decreto[-\s]lei|decreto[-\s]legislativo|"
     r"medida\s+provisoria|emenda\s+constitucional|"
-    r"constituicao|resolucao|lei|decreto)"
+    r"constituicao|resolucao|portaria|lei|decreto)"
     r"(?:\s+[a-z][a-z./-]*)?"
     r"\s*n[o°º]?\s*"
     r"([\d\.]+)"
@@ -239,15 +267,18 @@ def detect(stem: str, agency_map: dict[str, str] | None = None) -> Detection:
     if not tokens:
         return Detection(skip_reason="Empty filename")
 
-    # Agency-resolution special case: `res_<agency>_...`. The `<agency>` token
-    # is mapped to its LexML authority URN fragment via `agency_map`; the doc is
-    # then routed through the (Lei) fallback profile + PROFILE_OVERRIDES. An
-    # agency missing from the map is skipped rather than mislabelled "federal".
-    # Legislative variants (res_senado / res_camara / res_congresso) fall
-    # through to the general RULES engine below.
-    if (tokens[0] == AGENCY_RESOLUTION_PREFIX
+    # Agency special case: `<prefix>_<agency>_...` where the leading token
+    # selects the tipoNorma (AGENCY_PREFIX_TIPONORMA: res -> resolucao,
+    # portaria -> portaria) and `<agency>` is mapped to its LexML authority URN
+    # fragment via `agency_map`. The doc is then routed through the (Lei)
+    # fallback profile + PROFILE_OVERRIDES[tipoNorma]. An agency missing from the
+    # map is skipped rather than mislabelled "federal". For `res`, the
+    # legislative variants (res_senado / res_camara / res_congresso) are NOT
+    # agencies and fall through to the general RULES engine below.
+    prefix_tipo = AGENCY_PREFIX_TIPONORMA.get(tokens[0])
+    if (prefix_tipo is not None
             and len(tokens) >= 2
-            and tokens[1] not in AGENCY_LEGISLATIVE_TOKENS):
+            and not (tokens[0] == "res" and tokens[1] in AGENCY_LEGISLATIVE_TOKENS)):
         agency = tokens[1]
         autoridade = agency_map.get(agency)
         if autoridade is None:
@@ -258,10 +289,10 @@ def detect(stem: str, agency_map: dict[str, str] | None = None) -> Detection:
             )
         det = Detection(
             autoridade=autoridade,
-            tipo_norma="resolucao",
+            tipo_norma=prefix_tipo,
             agency=agency,
         )
-        # Skip the `res` + `<agency>` tokens when scanning for numero/ano/data.
+        # Skip the `<prefix>` + `<agency>` tokens when scanning for numero/ano/data.
         matched_len = 2
         for t in tokens[matched_len:]:
             if not t.isdigit():

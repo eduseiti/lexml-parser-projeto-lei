@@ -56,6 +56,31 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-one
    --linker /usr/local/bin/linkertool
 ```
 
+### Portaria
+
+`Portaria` has a registered profile under the generic `federal` authority, so
+`-a federal -t portaria` works with no `--prof-*` flags. Per-ministry documents
+carry a distinct authority URN (resolved from the filename agency token via
+`scripts/agency_authority.json`, e.g. `mjsp →
+ministerio.justica.seguranca.publica`) that misses the registry and falls back
+to the `Lei` profile, so they need the same `--prof-*` overrides
+`batch_parse.py` passes:
+
+```bash
+LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-onejar.jar parse \
+   -m application/vnd.openxmlformats-officedocument.wordprocessingml.document \
+   -i ../novas_normas_20260420/manual_20260421/portaria_mjsp_502_2021.docx \
+   -o ../novas_normas_20260420/teste_portaria/portaria_mjsp_502_2021.docx.xml \
+   --write-errors-to-file ../novas_normas_20260420/teste_portaria/portaria_mjsp_502_2021.docx.err.log \
+   -a ministerio.justica.seguranca.publica -t portaria -n 502 --data 2021-11-23 \
+   --prof-regex-epigrafe '^portaria' \
+   --prof-regex-epigrafe-continuacao '^portaria%^n[oº°˚]' \
+   --prof-regex-pos-epigrafe '^diario oficial%^publicado em%^orgao:%^edicao%^secao' \
+   --prof-regex-preambulo '^o ministro de estado%^a ministra de estado' \
+   --prof-epigrafe-head 'PORTARIA' \
+   --linker /usr/local/bin/linkertool
+```
+
 ## Helper scripts (`scripts/`)
 
 Two Python 3 helpers automate the bulk steps that bookend the Scala parser:

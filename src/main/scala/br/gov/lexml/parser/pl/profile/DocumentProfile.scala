@@ -372,6 +372,7 @@ object DocumentProfileRegister {
       LeiDelegada,
       DecretoLei,
       Decreto,
+      Portaria,
       DecretoLegislativoDoCongresso,
       DecretoLegislativoFederal,
       EmendaConstitucional,
@@ -438,6 +439,36 @@ trait ResolucaoProfile extends NormaProfile {
   override def epigrafeHead: String = "RESOLUÇÃO"
   override def regexEpigrafe: List[Regex] = super.regexEpigrafe ++ List("^resolucao"r)
   override def regexEpigrafe1: List[Regex] = super.regexEpigrafe1 ++ List("^resolucao"r)
+}
+
+trait PortariaProfile extends NormaProfile {
+  override def urnFragTipoNorma: String = "portaria"
+  override def epigrafeHead: String = "PORTARIA"
+  // "PORTARIA MJSP Nº 502, ..." folds to "portaria mjsp no 502, ..."; the agency
+  // segment after "portaria" is absorbed by the ^-anchored match (same as the
+  // res_<agency> resolutions).
+  override def regexEpigrafe1: List[Regex] = super.regexEpigrafe1 ++ List("^portaria"r)
+  override def regexEpigrafe: List[Regex] = super.regexEpigrafe ++ List("^portaria"r)
+  // Diário Oficial da União export boilerplate that sits before the epigraph and
+  // between the epigraph and the ementa. Matched against NFD-folded, diacritics-
+  // stripped, lowercased text, so written lowercase and unaccented.
+  override def regexPosEpigrafe: List[Regex] = super.regexPosEpigrafe ++ List(
+    "^diario oficial"r,
+    "^publicado em"r,
+    "^orgao:"r,
+    "^edicao"r,
+    "^secao"r
+  )
+  // Ministerial preamble opener; the default profile only knows the legislative
+  // openers ("o congresso nacional ...", "[ao] president[ae] ..."). Kept broad so
+  // it matches any ministry ("O MINISTRO DE ESTADO DA JUSTIÇA ...", "... DA
+  // SAÚDE ...", etc.), masculine and feminine.
+  override def regexPreambulo: List[Regex] = super.regexPreambulo ++ List(
+    "^o ministro de estado"r,
+    "^a ministra de estado"r
+  )
+  // ementaAusente stays false (the ementa is present) and epigrafeObrigatoria
+  // stays true (the DOU epigraph is always present) — both inherited defaults.
 }
 
 trait DecretoLegislativoProfile extends NormaProfile {
@@ -656,7 +687,18 @@ object MedidaProvisoriaFederal extends DocumentProfile with DefaultRegexProfile 
   //FIXME: Medida Provisória com Sequencial  
 }
 
-object ConstituicaoFederal extends DocumentProfile with ConstituicaoFederalProfile with DefaultRegexProfile {  
+// Registered under the generic "federal" authority, so `-a federal -t portaria`
+// works natively with no CLI overrides. Per-ministry filenames carry a distinct
+// authority URN (e.g. ministerio.justica.seguranca.publica) that misses the
+// registry and falls back to Lei, so batch_parse.py additionally passes the
+// matching --prof-* overrides (see PROFILE_OVERRIDES["portaria"]); keep the two
+// in sync. The agency segment is intentionally not encoded in the template.
+object Portaria extends PortariaProfile with FederalProfile {
+  override def epigrafeTemplateCode : String =
+    """PORTARIA Nº <numeroComComplemento>, DE <dataExtenso>"""
+}
+
+object ConstituicaoFederal extends DocumentProfile with ConstituicaoFederalProfile with DefaultRegexProfile {
 	override def regexLocalData: List[Regex] = super.regexLocalData ++ List(
 	      "^sala da sessao"r,
 	      "^sala das sessoes"r,
