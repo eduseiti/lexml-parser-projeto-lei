@@ -81,6 +81,29 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-one
    --linker /usr/local/bin/linkertool
 ```
 
+### Instrução Normativa (Receita Federal)
+
+Receita acts (`in_*`, `ade_*`, `adi_*`) carry a hierarchical authority URN with
+`;` (and `,` for joint acts), so **quote the `-a` value** in the shell. They
+fall back to the `Lei` profile and need the `--prof-*` overrides that
+`batch_parse.py` passes (`PROFILE_OVERRIDES`):
+
+```bash
+LC_ALL=C.UTF-8 LANG=C.UTF-8 java -jar target/lexml-parser-projeto-lei-1.15.0-onejar.jar parse \
+   -m application/vnd.openxmlformats-officedocument.wordprocessingml.document \
+   -i ../br-taxqa-r_v2.0/original/articulados/in_rfb_1500_20141029.docx \
+   -o ../br-taxqa-r_v2.0/teste_in/in_rfb_1500_20141029.xml \
+   --write-errors-to-file ../br-taxqa-r_v2.0/teste_in/in_rfb_1500_20141029.err.log \
+   -a 'ministerio.fazenda;secretaria.receita.federal.brasil' -t instrucao.normativa \
+   -n 1500 --data 2014-10-29 \
+   --prof-regex-epigrafe '^instrucao normativa' \
+   --prof-regex-epigrafe-continuacao '^instrucao normativa%^n[oº°˚]' \
+   --prof-regex-pos-epigrafe '^\[%^publicado no%^norma federal' \
+   --prof-regex-preambulo '^(o |a )?secretari[oa]%^[ao] coordenador%^a diretoria colegiada%^o ministro presidente%^o presidente d%^o comite gestor' \
+   --prof-epigrafe-head 'INSTRUÇÃO NORMATIVA' \
+   --linker /usr/local/bin/linkertool
+```
+
 ## Helper scripts (`scripts/`)
 
 Two Python 3 helpers automate the bulk steps that bookend the Scala parser:
@@ -91,10 +114,15 @@ CSVs. Run both from the repo root with `LC_ALL=C.UTF-8 LANG=C.UTF-8`.
 
 Walks an input folder, infers each document's Brazilian-law profile from its
 filename (e.g. `decreto_*`, `res_<agency>_*`), and invokes the onejar with the
-matching `-a`/`-t` flags. Agencies for `res_*` files are resolved via
-`scripts/agency_authority.json` (acronym → authority URN fragment); documents
-whose type/agency isn't supported are skipped and listed in a report. Only the
-onejar is required (no extra pip deps).
+matching `-a`/`-t` flags. Agency prefixes are `res`/`resol` (resolucao),
+`portaria`, `in` (instrucao.normativa), `ade`/`adi` (ato.declaratorio.
+executivo/interpretativo), `circ` (circular) and `port_conj` (portaria.conjunta,
+joint act: `port_conj_tse_srf_*`). Their agency tokens are resolved via
+`scripts/agency_authority.json` (acronym → authority URN fragment; a value may be
+a date-ranged list, e.g. `cosit`/`codac` → SRF before 2007-05-02, RFB after);
+joint-act authorities are `,`-joined alphabetically. Documents whose type/agency
+isn't supported are skipped and listed in a report. Only the onejar is required
+(no extra pip deps).
 
 ```bash
 LC_ALL=C.UTF-8 LANG=C.UTF-8 python3 scripts/batch_parse.py \

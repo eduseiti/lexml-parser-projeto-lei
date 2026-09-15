@@ -398,7 +398,91 @@ object Block extends Block {
     (bef.reverse, aft.reverse)
   }
 
-  val reFimAlteracao: Regex = """ *(?:\((ac|nr)\))? *(?:”|“|"|'')(?: *\((ac|nr)\.?\))?(?: *\([^()]*\))?$""".r
+  // Fecha-aspas at the end of the paragraph, optionally followed by the
+  // punctuation of the enclosing sentence (`".`, `";`), a `(NR)`/`(AC)` note
+  // and trailing `(…)` / `[…]` notes (e.g. `…” (NR) [Redação dada …]`).
+  val reFimAlteracao: Regex =
+    """ *(?:\((ac|nr)\))? *(?:”|“|"|'')[.;]?(?: *\((ac|nr)\.?\))?(?: *(?:\([^()]*\)|\[[^\[\]]*\]))*\.?$""".r
+
+  /** Number of double quotes (`"“”`) in `s`. */
+  def contaAspas(s: String): Int = s.count(c => c == '"' || c == '“' || c == '”')
+
+  private def comecaComAspas(t: String): Boolean =
+    t.startsWith("“") || t.startsWith("\"") || t.startsWith("”")
+
+  /** Match of `reFimAlteracao` in `t` if the paragraph closes an Alteração:
+   * the quotes before the closing one must be balanced, so that a paragraph
+   * ending with an inline quoted term (`… o termo "x".`) does not close it.
+   * A leading abre-aspas (`“§ 2º …” (NR)`, the last paragraph of a
+   * multi-paragraph Alteração) is not counted. */
+  def fechaAlteracao(t: String): Option[Regex.Match] =
+    reFimAlteracao.findFirstMatchIn(t).filter { m =>
+      val prefix0 = t.substring(0, m.start)
+      val prefix = if (prefix0.length > 1 && comecaComAspas(prefix0)) prefix0.substring(1) else prefix0
+      contaAspas(prefix) % 2 == 0
+    }
+
+  /** Whether a paragraph starting with `"`/`“`/`”` opens an Alteração: its
+   * opening quote is still open at the end of the paragraph (odd quote count),
+   * or the paragraph closes it itself (single-paragraph Alteração). A
+   * paragraph that merely starts with an inline quoted term (`"Land" Berlim`)
+   * does not. */
+  def abreAlteracao(t: String): Boolean =
+    comecaComAspas(t) && (contaAspas(t) % 2 == 1 || fechaAlteracao(t.substring(1)).isDefined)
+
+  // Receita-site editorial notes exported as a paragraph of their own, right
+  // after the dispositivo they annotate: "[Redação dada pelo(a) …]",
+  // "[Incluído(a) pelo(a) …]", "[Revogado(a) pelo(a) …]", "[Vide …]", …
+  // Matched against the normalized (lowercased, accent-free) text.
+  val reNotaEditorial: Regex =
+    """^\[(?:redacao dada|incluid|revogad|vide|suprimid|renumerad|regulamentad|republicacao|texto)[^\]]*\]$""".r
+
+  // Fragment starting with the closing half of an inline quoted term, followed
+  // by punctuation or by lowercase text that is not an alínea rótulo
+  // (`" do inciso III …`, `", aluguéis …`). `.` is left out on purpose so that
+  // an omissis line (`"……… "`) is never merged.
+  private val reFragmentoFechaAspas: Regex = """^["”](?:\s*[,;:)]|\s+(?![a-z]\))\p{Ll})""".r
+  // Paragraph ending with the opening half of a short inline quoted term
+  // (`… na alínea " c`).
+  private val reFragmentoAbreAspas: Regex = """["“]\s*[^"“”]{1,40}$""".r
+
+  /** Paragraph-normalization pass run before `reconheceAlteracoes`. Merges a
+   * Paragraph into the preceding one (skipping empty paragraphs):
+   *  - A1: the second half of a sentence split around an inline quoted token
+   *    (HTML→DOCX artefact: `… alínea " c` + `" do inciso III …`);
+   *  - A2: a fragment starting with `,`, `;` or `:`;
+   *  - E: an editorial note (`reNotaEditorial`), appended as trailing text so
+   *    it stays with the dispositivo it annotates instead of becoming the next
+   *    dispositivo's título; dropped when no Paragraph precedes it. */
+  def juntaFragmentos(blocks: List[Block]): List[Block] = {
+    def anterior(acc: List[Block]): (List[Block], Option[Paragraph], List[Block]) = {
+      val (vazios, resto) = acc.span { case p: Paragraph => p.isEmpty; case _ => false }
+      resto match {
+        case (prev: Paragraph) :: r => (vazios, Some(prev), r)
+        case _ => (vazios, None, resto)
+      }
+    }
+
+    blocks.foldLeft(List[Block]()) {
+      case (acc, cur: Paragraph) if !cur.isEmpty =>
+        val (vazios, prevOpt, r) = anterior(acc)
+        def junta(prev: Paragraph, sep: Seq[Node]): List[Block] =
+          vazios ++ (prev.copy(nodes = prev.nodes ++ sep ++ cur.nodes) :: r)
+        val ut = cur.unormalizedText
+        prevOpt match {
+          case _ if reNotaEditorial.matches(cur.text) =>
+            prevOpt.map(junta(_, Text(" "))).getOrElse(acc)
+          case Some(prev) if ut.startsWith(",") || ut.startsWith(";") || ut.startsWith(":") =>
+            junta(prev, Nil)
+          case Some(prev) if reFragmentoFechaAspas.findFirstIn(ut).isDefined &&
+            contaAspas(prev.unormalizedText) % 2 == 1 &&
+            reFragmentoAbreAspas.findFirstIn(prev.unormalizedText).isDefined =>
+            junta(prev, Nil)
+          case _ => cur :: acc
+        }
+      case (acc, b) => b :: acc
+    }.reverse
+  }
 
   def agrupaAlteracoes(blocks: List[Block]): List[Block] =
     blocks.foldRight[List[Block]](Nil) {
@@ -418,7 +502,7 @@ object Block extends Block {
             AlteracaoSemFechaAspas.in(acum.reverse.take(3).collect({case p : Paragraph => p.text }) :_*)
           )
         case (p@Paragraph(_, t)) :: rest =>
-          val oms = reFimAlteracao.findFirstMatchIn(t)
+          val oms = fechaAlteracao(t)
           oms match {
             case None =>
               procuraFim(rest, p :: acum)
@@ -434,7 +518,7 @@ object Block extends Block {
             case Nil => procuraFim(rest, o :: acum)
             case lastLi => lastLi.last match {
               case p@Paragraph(_, t) =>
-                val oms = reFimAlteracao.findFirstMatchIn(t)
+                val oms = fechaAlteracao(t)
                 oms match {
                   case None => procuraFim(rest, o :: acum)
                   case Some(m) =>
@@ -467,7 +551,7 @@ object Block extends Block {
     def reconheceInicio(blocks: List[Block], acum: List[Block]): List[Block] = {
       blocks match {
 
-        case (p@Paragraph(_, t)) :: rest if t.startsWith("“") || t.startsWith("\"") || t.startsWith("”") || t.startsWith("''") =>
+        case (p@Paragraph(_, t)) :: rest if abreAlteracao(t) || t.startsWith("''") =>
           val l = p.nodes.text.takeWhile(_.isWhitespace).length + 1
           val p2 = p.cutLeft(l).withAbreAspas
           val (balt, na, rest2) = procuraFim(p2 :: rest, List[Block]())
@@ -481,7 +565,7 @@ object Block extends Block {
           lis.headOption.getOrElse(List()) match {
             case Nil => reconheceInicio(rest, o :: acum)
             case (p@Paragraph(_, t)) :: tailLi =>
-              if (t.startsWith("“") || t.startsWith("\"") || t.startsWith("”")) {
+              if (abreAlteracao(t)) {
                 val l = p.nodes.text.takeWhile(_.isWhitespace).length + 1
                 val p2 = p.cutLeft(l).withAbreAspas
                 val o2 = OL((p2 :: tailLi) :: lis.tail)

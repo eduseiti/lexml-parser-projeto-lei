@@ -63,26 +63,78 @@ RULES: list[tuple[tuple[str, ...], str, str]] = [
     (("decreto",), "federal", "decreto"),
 ]
 
-# Filenames whose second token is a regulatory/ministerial AGENCY acronym
-# (e.g. `res_anatel_*`, `portaria_mjsp_*`) rather than a fixed authority. The
-# parser has no registered profile keyed on (autoridade=<agency-urn>, tipoNorma),
-# so we route them through the fallback profile (Lei) plus the runtime overrides
-# in PROFILE_OVERRIDES. The leading token selects the tipoNorma:
-#   res_<agency>      -> resolucao   (regulatory-agency resolution)
-#   portaria_<agency> -> portaria    (ministerial order)
-# The `<agency>` token (e.g. "anpd", "mjsp") is mapped to its LexML authority URN
+# Filenames whose leading token(s) select the document type and whose next
+# token(s) are the issuing AGENCY acronym(s) (e.g. `res_anatel_*`,
+# `portaria_mjsp_*`, `in_rfb_*`) rather than a fixed authority. The parser has
+# no registered profile keyed on (autoridade=<agency-urn>, tipoNorma), so we
+# route them through the fallback profile (Lei) plus the runtime overrides in
+# PROFILE_OVERRIDES. The leading token(s) select the tipoNorma:
+#   res_<agency> / resol_<agency> -> resolucao  (agency/council resolution)
+#   portaria_<agency>             -> portaria   (ministerial order)
+#   in_<agency>                   -> instrucao.normativa
+#   ade_<agency>                  -> ato.declaratorio.executivo
+#   adi_<agency>                  -> ato.declaratorio.interpretativo
+#   circ_<agency>                 -> circular
+#   port_conj_<agency>_<agency>   -> portaria.conjunta (joint act)
+# The agency tokens are every non-digit token between the prefix and the first
+# digit token (one for most documents, several for joint acts such as
+# `port_conj_tse_srf_74_20060110`). Each is mapped to its LexML authority URN
 # fragment via the agency-authority map loaded from AGENCY_AUTHORITY_MAP_FILE;
-# unmapped agencies are skipped so we never emit a wrong "federal" authority.
-AGENCY_PREFIX_TIPONORMA = {"res": "resolucao", "portaria": "portaria"}
-# For `res_*`, these second tokens are legislative bodies with registered
-# profiles (not agencies), so they fall through to the general RULES engine.
+# if any is unmapped the document is skipped so we never emit a wrong
+# "federal" authority. Joint acts join the fragments with `,` in alphabetical
+# order (LexML URN spec, Parte 2, §8.2). Longest prefix wins.
+AGENCY_PREFIX_TIPONORMA: dict[tuple[str, ...], str] = {
+    ("res",): "resolucao",
+    ("resol",): "resolucao",
+    ("portaria",): "portaria",
+    ("in",): "instrucao.normativa",
+    ("ade",): "ato.declaratorio.executivo",
+    ("adi",): "ato.declaratorio.interpretativo",
+    ("circ",): "circular",
+    ("port", "conj"): "portaria.conjunta",
+}
+# For `res_*` / `resol_*`, these second tokens are legislative bodies with
+# registered profiles (not agencies), so they fall through to the general
+# RULES engine.
+AGENCY_LEGISLATIVE_PREFIXES = frozenset({("res",), ("resol",)})
 AGENCY_LEGISLATIVE_TOKENS = frozenset({"senado", "camara", "congresso"})
 
 # Default location of the JSON file mapping a lowercased/accent-folded agency
 # acronym to its LexML authority URN fragment, e.g.
 # {"anpd": "agencia.nacional.protecao.dados"}. Overridable with
-# --agency-authority-map.
+# --agency-authority-map. A value may also be a date-ranged list, for issuers
+# whose parent authority changed over time (e.g. Cosit/Codac, units of the SRF
+# until it became the RFB in 2007):
+#   "codac": [{"before": "2007-05-02", "urn": "<SRF form>"}, {"urn": "<RFB form>"}]
+# The first entry whose `before` is later than the document date (or that has
+# no `before`) wins; with an unknown date, the open-ended entry is used.
 AGENCY_AUTHORITY_MAP_FILE = Path(__file__).resolve().parent / "agency_authority.json"
+
+# Shared by every Receita/agency-style tipo below.
+# - pos-epigrafe skips the Receita-site editorial notes placed between the
+#   epígrafe and the ementa ("[Revogado(a) pelo(a) ...]", "[Republicação ...]",
+#   "[Vide ...]") and the "Publicado no DOU ..." / "Norma Federal - Publicado
+#   no DO ..." lines.
+# - preambulo recognizes the issuer's opener: "O SECRETÁRIO (ESPECIAL) DA
+#   RECEITA FEDERAL ...", "A SECRETÁRIA ...", the article-less "SECRETÁRIO DA
+#   RECEITA FEDERAL, ..." (in_srf_256), "O COORDENADOR-GERAL ...", "A Diretoria
+#   Colegiada do Banco Central ...", "O MINISTRO PRESIDENTE DO TSE E O
+#   SECRETÁRIO ...", "O PRESIDENTE DO CONSELHO ...", "O COMITÊ GESTOR ...".
+_POS_EPIGRAFE_ORGAO = r"^\[%^publicado no%^norma federal"
+_PREAMBULO_ORGAO = (r"^(o |a )?secretari[oa]%^[ao] coordenador%^a diretoria colegiada"
+                    r"%^o ministro presidente%^o presidente d%^o comite gestor")
+
+
+def _orgao_overrides(epigrafe: str, head: str, extra_pos: str = "") -> list[str]:
+    """PROFILE_OVERRIDES entry for a Receita/agency-style tipoNorma whose
+    normalized epígrafe starts with `epigrafe` (e.g. `^instrucao normativa`)."""
+    return [
+        "--prof-regex-epigrafe", epigrafe,
+        "--prof-regex-epigrafe-continuacao", epigrafe + r"%^n[oº°˚]",
+        "--prof-regex-pos-epigrafe", _POS_EPIGRAFE_ORGAO + extra_pos,
+        "--prof-regex-preambulo", _PREAMBULO_ORGAO,
+        "--prof-epigrafe-head", head,
+    ]
 
 # Extra CLI flags appended for agency documents (det.agency set), whose
 # (authority, tipoNorma) pair has no registered DocumentProfile: they fall back
@@ -125,14 +177,32 @@ AGENCY_AUTHORITY_MAP_FILE = Path(__file__).resolve().parent / "agency_authority.
 # to) the base list, so each value must be self-contained — e.g. the
 # epigrafe-continuacao must list both `^<tipo>` and `^n[oº°˚]` since the Lei
 # base's `^(n[oº°˚]|complementar)` continuation is lost when overridden.
+#
+# - resolucao also covers the council/committee resolutions of the Receita
+#   corpus (resol_cgsn / resol_cgpc): "O PRESIDENTE DO CONSELHO ..." and "O
+#   COMITÊ GESTOR ..." openers, "[...]" editorial notes and "Publicado no DOU"
+#   lines.
+# - portaria.conjunta's pos-epigrafe also drops the TSE-site notes that sit
+#   before the ementa ("Lei nº 11.457/2007, art. 1º: altera a denominação ...",
+#   "V. Port. Conjunta-TSE/RFB n. 1/2016: ...").
 PROFILE_OVERRIDES: dict[str, list[str]] = {
     "resolucao": [
         "--prof-regex-epigrafe", "^resolucao",
         "--prof-regex-epigrafe-continuacao", r"^resolucao%^n[oº°˚]",
-        "--prof-regex-pos-epigrafe", r"^publicado:%^left\d%^acessos:%^prazos%^observacao",
-        "--prof-regex-preambulo", "^o conselho diretor",
+        "--prof-regex-pos-epigrafe",
+        r"^publicado:%^left\d%^acessos:%^prazos%^observacao%^\[%^publicado no",
+        "--prof-regex-preambulo", "^o conselho diretor%^o presidente d%^o comite gestor",
         "--prof-epigrafe-head", "RESOLUÇÃO",
     ],
+    "instrucao.normativa": _orgao_overrides("^instrucao normativa", "INSTRUÇÃO NORMATIVA"),
+    "ato.declaratorio.executivo": _orgao_overrides(
+        "^ato declaratorio executivo", "ATO DECLARATÓRIO EXECUTIVO"),
+    "ato.declaratorio.interpretativo": _orgao_overrides(
+        "^ato declaratorio interpretativo", "ATO DECLARATÓRIO INTERPRETATIVO"),
+    "circular": _orgao_overrides("^circular", "CIRCULAR"),
+    "portaria.conjunta": _orgao_overrides(
+        "^portaria conjunta", "PORTARIA CONJUNTA",
+        extra_pos=r"%^v\. %^lei n[oº°]\s*[\d.]+/\d{4}, art"),
     "portaria": [
         "--prof-regex-epigrafe", "^portaria",
         "--prof-regex-epigrafe-continuacao", r"^portaria%^n[oº°˚]",
@@ -143,20 +213,52 @@ PROFILE_OVERRIDES: dict[str, list[str]] = {
 }
 
 
-def load_agency_authority_map(path: Path, required: bool) -> dict[str, str]:
+# Normalized agency-map value: [(before YYYY-MM-DD or None, urn), ...].
+AgencyEntries = list[tuple[str | None, str]]
+
+
+def load_agency_authority_map(path: Path, required: bool) -> dict[str, AgencyEntries]:
     """Load the agency-acronym → authority-URN-fragment map from JSON.
 
-    Keys are accent-folded and lowercased to match `tokenize()` output. When
-    `required` is False (the default file) a missing file yields an empty map so
-    the script still runs; when True (an explicit --agency-authority-map) a
-    missing file is a hard error handled by the caller.
+    Keys are accent-folded and lowercased to match `tokenize()` output. Values
+    are either a plain URN string or a date-ranged list of
+    {"before": "YYYY-MM-DD", "urn": ...} objects (see AGENCY_AUTHORITY_MAP_FILE);
+    both are normalized to a list of (before, urn) pairs. When `required` is
+    False (the default file) a missing file yields an empty map so the script
+    still runs; when True (an explicit --agency-authority-map) a missing file is
+    a hard error handled by the caller.
     """
     if not path.exists():
         if required:
             raise FileNotFoundError(path)
         return {}
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return {strip_accents(k).lower(): str(v) for k, v in raw.items()}
+    out: dict[str, AgencyEntries] = {}
+    for k, v in raw.items():
+        if isinstance(v, list):
+            entries = [(e.get("before"), str(e["urn"])) for e in v]
+        else:
+            entries = [(None, str(v))]
+        out[strip_accents(k).lower()] = entries
+    return out
+
+
+def resolve_authority(entries: AgencyEntries, data: str | None) -> str:
+    """Pick the URN fragment valid at `data` (YYYY-MM-DD) from a map value."""
+    for before, urn in entries:
+        if before is None:
+            return urn
+        if data is not None and data < before:
+            return urn
+    return entries[-1][1]
+
+
+def resolve_agencies(agencies: list[str], agency_map: dict[str, AgencyEntries],
+                     data: str | None) -> str:
+    """Authority for one or more issuer tokens; joint acts are `,`-joined in
+    alphabetical order of their URN fragments (LexML URN spec §8.2)."""
+    urns = sorted({resolve_authority(agency_map[a], data) for a in agencies})
+    return ",".join(urns)
 
 
 @dataclass
@@ -166,7 +268,10 @@ class Detection:
     numero: str | None = None
     data: str | None = None  # YYYY-MM-DD
     ano: str | None = None   # YYYY
-    agency: str | None = None  # set for agency filenames (`res_<agency>_*`, `portaria_<agency>_*`)
+    # Set for agency filenames (`res_<agency>_*`, `in_<agency>_*`, ...): the
+    # issuer tokens joined with `_` (e.g. "rfb", "tse_srf").
+    agency: str | None = None
+    agencies: list[str] = field(default_factory=list)
     skip_reason: str | None = None
 
 
@@ -196,17 +301,26 @@ PT_MONTHS = {
 # keyword and "nº", e.g. "RESOLUÇÃO CD/ANPD Nº 4, DE 24 DE FEVEREIRO DE 2023".
 # The optional `(?:\s+[a-z][a-z./-]*)?` group absorbs that single short token
 # (letters plus `. / -`); it is non-capturing and bounded so it cannot swallow
-# ementa text.
+# ementa text. Receita acts carry their issuer there too ("Instrução Normativa
+# RFB nº 1500, ...", "Ato Declaratório Executivo Codac nº 23, ...").
+#
+# The date is either spelled out ("de 7 de outubro de 1997", groups 2-4) or
+# numeric ("DE 21/02/2011", groups 5-7, Receita-site exports). Shapes that
+# match neither fall back to the filename values.
 _EPIGRAFE_RE = re.compile(
     r"^\s*"
     r"(?:lei\s+complementar|lei\s+delegada|"
     r"decreto[-\s]lei|decreto[-\s]legislativo|"
     r"medida\s+provisoria|emenda\s+constitucional|"
-    r"constituicao|resolucao|portaria|lei|decreto)"
+    r"instrucao\s+normativa|"
+    r"ato\s+declaratorio\s+(?:executivo|interpretativo)|"
+    r"portaria\s+conjunta|"
+    r"constituicao|resolucao|portaria|circular|lei|decreto)"
     r"(?:\s+[a-z][a-z./-]*)?"
     r"\s*n[o°º]?\s*"
     r"([\d\.]+)"
-    r"[^0-9a-z]+de\s+(\d{1,2})[oa°º]?\s+de\s+([a-z]+)\s+de\s+(\d{4})"
+    r"[^0-9a-z]+de\s+(?:(\d{1,2})[oa°º]?\s+de\s+([a-z]+)\s+de\s+(\d{4})"
+    r"|(\d{1,2})/(\d{1,2})/(\d{4}))"
 )
 
 
@@ -239,9 +353,14 @@ def parse_docx_metadata(docx: Path) -> tuple[str | None, str | None]:
         if not m:
             continue
         numero = m.group(1).replace(".", "").lstrip("0") or "0"
-        day = int(m.group(2))
-        month = PT_MONTHS.get(m.group(3))
-        year = int(m.group(4))
+        if m.group(2) is not None:
+            day = int(m.group(2))
+            month = PT_MONTHS.get(m.group(3))
+            year = int(m.group(4))
+        else:
+            day = int(m.group(5))
+            month = int(m.group(6)) if 1 <= int(m.group(6)) <= 12 else None
+            year = int(m.group(7))
         if month is None:
             return numero, None
         if not (1 <= day <= 31 and 1000 <= year <= 2999):
@@ -261,39 +380,58 @@ def tokenize(stem: str) -> list[str]:
     return [t for t in re.split(r"[\s_\-]+", folded) if t]
 
 
-def detect(stem: str, agency_map: dict[str, str] | None = None) -> Detection:
+def _agency_prefix(tokens: list[str]) -> tuple[tuple[str, ...], str] | None:
+    """Longest AGENCY_PREFIX_TIPONORMA prefix of `tokens`, with its tipoNorma."""
+    best = None
+    for prefix, tipo in AGENCY_PREFIX_TIPONORMA.items():
+        if tuple(tokens[:len(prefix)]) == prefix and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, tipo)
+    return best
+
+
+def detect(stem: str, agency_map: dict[str, AgencyEntries] | None = None) -> Detection:
     agency_map = agency_map or {}
     tokens = tokenize(stem)
     if not tokens:
         return Detection(skip_reason="Empty filename")
 
-    # Agency special case: `<prefix>_<agency>_...` where the leading token
-    # selects the tipoNorma (AGENCY_PREFIX_TIPONORMA: res -> resolucao,
-    # portaria -> portaria) and `<agency>` is mapped to its LexML authority URN
-    # fragment via `agency_map`. The doc is then routed through the (Lei)
-    # fallback profile + PROFILE_OVERRIDES[tipoNorma]. An agency missing from the
-    # map is skipped rather than mislabelled "federal". For `res`, the
-    # legislative variants (res_senado / res_camara / res_congresso) are NOT
-    # agencies and fall through to the general RULES engine below.
-    prefix_tipo = AGENCY_PREFIX_TIPONORMA.get(tokens[0])
-    if (prefix_tipo is not None
-            and len(tokens) >= 2
-            and not (tokens[0] == "res" and tokens[1] in AGENCY_LEGISLATIVE_TOKENS)):
-        agency = tokens[1]
-        autoridade = agency_map.get(agency)
-        if autoridade is None:
+    # Agency special case: `<prefix>_<agency>[_<agency>...]_...` where the
+    # leading token(s) select the tipoNorma (AGENCY_PREFIX_TIPONORMA) and each
+    # `<agency>` is mapped to its LexML authority URN fragment via `agency_map`.
+    # The doc is then routed through the (Lei) fallback profile +
+    # PROFILE_OVERRIDES[tipoNorma]. An agency missing from the map is skipped
+    # rather than mislabelled "federal". For `res`/`resol`, the legislative
+    # variants (res_senado / res_camara / res_congresso) are NOT agencies and
+    # fall through to the general RULES engine below.
+    match = _agency_prefix(tokens)
+    if match is not None:
+        prefix, prefix_tipo = match
+        matched_len = len(prefix)
+        agencies: list[str] = []
+        for t in tokens[matched_len:]:
+            if any(c.isdigit() for c in t):
+                break
+            agencies.append(t)
+    if (match is not None
+            and agencies
+            and not (prefix in AGENCY_LEGISLATIVE_PREFIXES
+                     and agencies[0] in AGENCY_LEGISLATIVE_TOKENS)):
+        agency = "_".join(agencies)
+        unmapped = [a for a in agencies if a not in agency_map]
+        if unmapped:
             return Detection(
                 agency=agency,
-                skip_reason=f"Unmapped agency acronym: {agency} "
+                agencies=agencies,
+                skip_reason=f"Unmapped agency acronym: {', '.join(unmapped)} "
                             f"(add it to the agency-authority map)",
             )
         det = Detection(
-            autoridade=autoridade,
             tipo_norma=prefix_tipo,
             agency=agency,
+            agencies=agencies,
         )
         # Skip the `<prefix>` + `<agency>` tokens when scanning for numero/ano/data.
-        matched_len = 2
+        matched_len += len(agencies)
         for t in tokens[matched_len:]:
             if not t.isdigit():
                 continue
@@ -307,6 +445,14 @@ def detect(stem: str, agency_map: dict[str, str] | None = None) -> Detection:
                 continue
             if det.numero is None:
                 det.numero = t
+        # `<prefix>_<agency>_<numero>_<YYYYMMDD>`: with a full date present, a
+        # 4-digit token taken as the year is really the act number (e.g.
+        # in_rfb_1131_20110221).
+        if det.data is not None and det.numero is None and det.ano is not None:
+            det.numero, det.ano = det.ano, None
+        # Authority depends on the date for date-ranged map entries; it is
+        # re-resolved in process_file once the epígrafe date is known.
+        det.autoridade = resolve_agencies(agencies, agency_map, det.data)
         return det
 
     matched_len = 0
@@ -370,7 +516,7 @@ def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
         args += ["--data", det.data]
     elif det.ano:
         args += ["--ano", det.ano]
-    # Overrides apply only to agency resolutions (det.agency set), never to
+    # Overrides apply only to agency documents (det.agency set), never to
     # legislative resolutions, which have registered profiles.
     if det.agency:
         args += PROFILE_OVERRIDES.get(det.tipo_norma or "", [])
@@ -380,7 +526,7 @@ def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
 
 
 def process_file(docx: Path, out_dir: Path, jar: Path, dry_run: bool,
-                 linker: Path | None, agency_map: dict[str, str]) -> Outcome:
+                 linker: Path | None, agency_map: dict[str, AgencyEntries]) -> Outcome:
     det = detect(docx.stem, agency_map)
     if det.skip_reason is not None:
         return Outcome(path=docx, status="skipped", detection=det,
@@ -396,6 +542,8 @@ def process_file(docx: Path, out_dir: Path, jar: Path, dry_run: bool,
     if content_data:
         det.data = content_data
         det.ano = None  # data supersedes ano
+    if det.agencies:
+        det.autoridade = resolve_agencies(det.agencies, agency_map, det.data)
 
     out_xml = out_dir / f"{docx.stem}.xml"
     err_log = out_dir / f"{docx.stem}.err.log"

@@ -1,5 +1,19 @@
 {
   "anpd": "agencia.nacional.protecao.dados",
   "anatel": "agencia.nacional.telecomunicacoes",
-  "mjsp": "ministerio.justica.seguranca.publica"
+  "mjsp": "ministerio.justica.seguranca.publica",
+  "srf": "ministerio.fazenda;secretaria.receita.federal",
+  "rfb": "ministerio.fazenda;secretaria.receita.federal.brasil",
+  "cosit": [
+    {"before": "2007-05-02", "urn": "ministerio.fazenda;secretaria.receita.federal"},
+    {"urn": "ministerio.fazenda;secretaria.receita.federal.brasil"}
+  ],
+  "codac": [
+    {"before": "2007-05-02", "urn": "ministerio.fazenda;secretaria.receita.federal"},
+    {"urn": "ministerio.fazenda;secretaria.receita.federal.brasil"}
+  ],
+  "cgsn": "ministerio.fazenda;comite.gestor.simples.nacional",
+  "cgpc": "ministerio.previdencia.social",
+  "tse": "tribunal.superior.eleitoral",
+  "bc": "banco.central.brasil"
 }

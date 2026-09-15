@@ -1,6 +1,7 @@
 # Plan: br-taxqa-r_v2.0 batch — fix the 5 `parse-failed` (error 17) and the 61 `skipped` documents
 
-Status: **plan only — not executed.**
+Status: **executed 2026-09-15**. The required items and A2 are done. See
+`20260915_142517_parse_failed_alteracao_sem_fecha_aspas_execution.md`.
 
 This file was amended on 2026-09-15. It originally covered only the 5 `parse-failed` documents
 (**Part I**). It now also covers the 61 `skipped` documents (**Part II**): the two were evaluated
