@@ -137,6 +137,10 @@ LC_ALL=C.UTF-8 LANG=C.UTF-8 python3 scripts/batch_parse.py \
 - `--agency-authority-map` defaults to `scripts/agency_authority.json`.
 - `--recursive` to descend into subfolders; `--dry-run` to print the planned
   invocations without running the parser.
+- Numbers with a complement (re-edited MPs, `MEDIDA PROVISÓRIA Nº 2.228-1`,
+  `mp_2228-1_20010906`) are passed as `-n 2228 --complemento 1`. A
+  constitution with no number gets its year (`-n 1988`), as in the LexML URN
+  `…constituicao:1988-10-05;1988`. Tests: `python3 -m pytest scripts/tests`.
 
 ### `run_segmentation_csv.py` — LexML XML folder → segmentation CSVs
 

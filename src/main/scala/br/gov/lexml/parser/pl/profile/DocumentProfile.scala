@@ -255,7 +255,15 @@ final case class DocumentProfileOverride(base : DocumentProfile,
   override def autoridadeEpigrafe: Option[String] = overrideAutoridadeEpigrafe.getOrElse(base.autoridadeEpigrafe)
   override def urnFragLocalidade : Option[String] = overrideUrnFragLocalidade.getOrElse(base.urnFragLocalidade)
   override def ementaAusente : Boolean = overrideEmentaAusente.getOrElse(base.ementaAusente)
-  
+
+  // Base profiles with a custom epígrafe template (Constituição, Decreto Legislativo, EC, ...) keep
+  // it; when the head or tail is overridden, the generic template is used so the override shows.
+  private def headOrTailOverridden : Boolean = overrideEpigrafeHead.isDefined || overrideEpigrafeTail.isDefined
+  override def epigrafeTemplateCode : String =
+    if (headOrTailOverridden) super.epigrafeTemplateCode else base.epigrafeTemplateCode
+  override def epigrafeSemIdTemplateCode : String =
+    if (headOrTailOverridden) super.epigrafeSemIdTemplateCode else base.epigrafeSemIdTemplateCode
+
   val hasOverride : Boolean = this.productIterator.exists { _.isInstanceOf[Some[_]] }
   
   override def +(o : Overrides): DocumentProfileOverride = copy(
@@ -725,7 +733,7 @@ object ConstituicaoFederal extends DocumentProfile with ConstituicaoFederalProfi
   override def regexPreambulo: List[Regex] = List(
         "^preambulo$"r
        )
-  override def epigrafeTemplateCode : String = """Constituição da República Federativa do Brasil."""
+  override def epigrafeTemplateCode : String = """Constituição da República Federativa do Brasil"""
 }
 
 object AtoDisposicoesConstitucionaisTransitorias extends DocumentProfile with AtoDisposicoesConstitucionaisTransitoriasProfile with DefaultRegexProfile {

@@ -266,6 +266,8 @@ class Detection:
     autoridade: str | None = None
     tipo_norma: str | None = None
     numero: str | None = None
+    # Suffix of re-edited MPs, e.g. "1" in "2.228-1" (parser `--complemento`).
+    complemento: str | None = None
     data: str | None = None  # YYYY-MM-DD
     ano: str | None = None   # YYYY
     # Set for agency filenames (`res_<agency>_*`, `in_<agency>_*`, ...): the
@@ -304,9 +306,10 @@ PT_MONTHS = {
 # ementa text. Receita acts carry their issuer there too ("Instrução Normativa
 # RFB nº 1500, ...", "Ato Declaratório Executivo Codac nº 23, ...").
 #
-# The date is either spelled out ("de 7 de outubro de 1997", groups 2-4) or
-# numeric ("DE 21/02/2011", groups 5-7, Receita-site exports). Shapes that
-# match neither fall back to the filename values.
+# The number may carry a complement, as in re-edited MPs ("Nº 2.228-1",
+# group 2). The date is either spelled out ("de 7 de outubro de 1997",
+# groups 3-5) or numeric ("DE 21/02/2011", groups 6-8, Receita-site exports).
+# Shapes that match neither fall back to the filename values.
 _EPIGRAFE_RE = re.compile(
     r"^\s*"
     r"(?:lei\s+complementar|lei\s+delegada|"
@@ -318,7 +321,7 @@ _EPIGRAFE_RE = re.compile(
     r"constituicao|resolucao|portaria|circular|lei|decreto)"
     r"(?:\s+[a-z][a-z./-]*)?"
     r"\s*n[o°º]?\s*"
-    r"([\d\.]+)"
+    r"([\d\.]+)(?:\s*[-\u2010\u2011\u2013]\s*(\d+))?"
     r"[^0-9a-z]+de\s+(?:(\d{1,2})[oa°º]?\s+de\s+([a-z]+)\s+de\s+(\d{4})"
     r"|(\d{1,2})/(\d{1,2})/(\d{4}))"
 )
@@ -343,9 +346,9 @@ def _docx_first_paragraphs(docx: Path, limit: int = 8) -> list[str]:
     return out
 
 
-def parse_docx_metadata(docx: Path) -> tuple[str | None, str | None]:
-    """Extract (numero, data_YYYY-MM-DD) from the epígrafe in the first
-    few paragraphs of a DOCX. Returns (None, None) if no match."""
+def parse_docx_metadata(docx: Path) -> tuple[str | None, str | None, str | None]:
+    """Extract (numero, complemento, data_YYYY-MM-DD) from the epígrafe in the
+    first few paragraphs of a DOCX. Returns (None, None, None) if no match."""
     paragraphs = _docx_first_paragraphs(docx)
     for raw in paragraphs:
         folded = strip_accents(raw.replace("\xa0", " ")).lower()
@@ -353,20 +356,21 @@ def parse_docx_metadata(docx: Path) -> tuple[str | None, str | None]:
         if not m:
             continue
         numero = m.group(1).replace(".", "").lstrip("0") or "0"
-        if m.group(2) is not None:
-            day = int(m.group(2))
-            month = PT_MONTHS.get(m.group(3))
-            year = int(m.group(4))
+        complemento = m.group(2)
+        if m.group(3) is not None:
+            day = int(m.group(3))
+            month = PT_MONTHS.get(m.group(4))
+            year = int(m.group(5))
         else:
-            day = int(m.group(5))
-            month = int(m.group(6)) if 1 <= int(m.group(6)) <= 12 else None
-            year = int(m.group(7))
+            day = int(m.group(6))
+            month = int(m.group(7)) if 1 <= int(m.group(7)) <= 12 else None
+            year = int(m.group(8))
         if month is None:
-            return numero, None
+            return numero, complemento, None
         if not (1 <= day <= 31 and 1000 <= year <= 2999):
-            return numero, None
-        return numero, f"{year:04d}-{month:02d}-{day:02d}"
-    return None, None
+            return numero, complemento, None
+        return numero, complemento, f"{year:04d}-{month:02d}-{day:02d}"
+    return None, None, None
 
 
 def strip_accents(s: str) -> str:
@@ -389,7 +393,19 @@ def _agency_prefix(tokens: list[str]) -> tuple[tuple[str, ...], str] | None:
     return best
 
 
+# `<numero>-<complemento>` filename token of re-edited MPs (`mp_2228-1_20010906`).
+# It is taken out before tokenizing, which splits on `-` and would read 2228
+# as a year.
+_NUMERO_COMPLEMENTO_RE = re.compile(r"_(\d+)-(\d+)(?=_|$)")
+
+
 def detect(stem: str, agency_map: dict[str, AgencyEntries] | None = None) -> Detection:
+    comp = _NUMERO_COMPLEMENTO_RE.search(stem)
+    if comp:
+        det = detect(stem[:comp.start()] + stem[comp.end():], agency_map)
+        if det.skip_reason is None:
+            det.numero, det.complemento = comp.group(1), comp.group(2)
+        return det
     agency_map = agency_map or {}
     tokens = tokenize(stem)
     if not tokens:
@@ -512,6 +528,8 @@ def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
     ]
     if det.numero:
         args += ["-n", det.numero]
+    if det.complemento:
+        args += ["--complemento", det.complemento]
     if det.data:
         args += ["--data", det.data]
     elif det.ano:
@@ -536,12 +554,17 @@ def process_file(docx: Path, out_dir: Path, jar: Path, dry_run: bool,
     # swaps them when, e.g., a pre-1000 decree numero like 2338 sits next
     # to a 4-digit year like 1997). Prefer values read from the DOCX
     # epígrafe line, and fall back to filename only if extraction fails.
-    content_numero, content_data = parse_docx_metadata(docx)
+    content_numero, content_complemento, content_data = parse_docx_metadata(docx)
     if content_numero:
         det.numero = content_numero
+        det.complemento = content_complemento
     if content_data:
         det.data = content_data
         det.ano = None  # data supersedes ano
+    # Constitutions have no number; LexML uses the year
+    # (urn:lex:br:federal:constituicao:1988-10-05;1988).
+    if det.tipo_norma == "constituicao" and not det.numero and (det.data or det.ano):
+        det.numero = (det.data or det.ano)[:4]
     if det.agencies:
         det.autoridade = resolve_agencies(det.agencies, agency_map, det.data)
 
