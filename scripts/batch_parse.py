@@ -10,6 +10,7 @@ natively supported.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -182,6 +183,9 @@ def _orgao_overrides(epigrafe: str, head: str, extra_pos: str = "") -> list[str]
 #   corpus (resol_cgsn / resol_cgpc): "O PRESIDENTE DO CONSELHO ..." and "O
 #   COMITÊ GESTOR ..." openers, "[...]" editorial notes and "Publicado no DOU"
 #   lines.
+# - resolucao also covers TSE resolutions (resol_tse): the "Relator: Ministro …"
+#   line between the epígrafe and the ementa, and the "O TRIBUNAL SUPERIOR
+#   ELEITORAL, …" opener.
 # - portaria.conjunta's pos-epigrafe also drops the TSE-site notes that sit
 #   before the ementa ("Lei nº 11.457/2007, art. 1º: altera a denominação ...",
 #   "V. Port. Conjunta-TSE/RFB n. 1/2016: ...").
@@ -190,8 +194,9 @@ PROFILE_OVERRIDES: dict[str, list[str]] = {
         "--prof-regex-epigrafe", "^resolucao",
         "--prof-regex-epigrafe-continuacao", r"^resolucao%^n[oº°˚]",
         "--prof-regex-pos-epigrafe",
-        r"^publicado:%^left\d%^acessos:%^prazos%^observacao%^\[%^publicado no",
-        "--prof-regex-preambulo", "^o conselho diretor%^o presidente d%^o comite gestor",
+        r"^publicado:%^left\d%^acessos:%^prazos%^observacao%^\[%^publicado no%^relator",
+        "--prof-regex-preambulo",
+        "^o conselho diretor%^o presidente d%^o comite gestor%^o tribunal superior eleitoral",
         "--prof-epigrafe-head", "RESOLUÇÃO",
     ],
     "instrucao.normativa": _orgao_overrides("^instrucao normativa", "INSTRUÇÃO NORMATIVA"),
@@ -515,8 +520,15 @@ def find_default_jar(repo_root: Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+# `--no-justificativa`: enacted acts have no "Justificação" section, so a
+# heading of that name (Lei 6.404/1976 before art. 225) must not end the
+# articulação. `(?!)` never matches.
+NO_JUSTIFICATIVA_ARGS = ["--prof-regex-justificativa", "(?!)"]
+
+
 def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
-                   det: Detection, linker: Path | None) -> list[str]:
+                   det: Detection, linker: Path | None,
+                   no_justificativa: bool = False) -> list[str]:
     args = [
         "java", "-jar", str(jar), "parse",
         "-m", DOCX_MIME,
@@ -538,13 +550,16 @@ def build_cli_args(jar: Path, docx: Path, out_xml: Path, err_log: Path,
     # legislative resolutions, which have registered profiles.
     if det.agency:
         args += PROFILE_OVERRIDES.get(det.tipo_norma or "", [])
+    if no_justificativa:
+        args += NO_JUSTIFICATIVA_ARGS
     if linker is not None:
         args += ["--linker", str(linker)]
     return args
 
 
 def process_file(docx: Path, out_dir: Path, jar: Path, dry_run: bool,
-                 linker: Path | None, agency_map: dict[str, AgencyEntries]) -> Outcome:
+                 linker: Path | None, agency_map: dict[str, AgencyEntries],
+                 no_justificativa: bool = False) -> Outcome:
     det = detect(docx.stem, agency_map)
     if det.skip_reason is not None:
         return Outcome(path=docx, status="skipped", detection=det,
@@ -570,7 +585,7 @@ def process_file(docx: Path, out_dir: Path, jar: Path, dry_run: bool,
 
     out_xml = out_dir / f"{docx.stem}.xml"
     err_log = out_dir / f"{docx.stem}.err.log"
-    cli = build_cli_args(jar, docx, out_xml, err_log, det, linker)
+    cli = build_cli_args(jar, docx, out_xml, err_log, det, linker, no_justificativa)
 
     if dry_run:
         print("DRY-RUN " + " ".join(cli))
@@ -648,6 +663,13 @@ def main() -> int:
                          f"fragment. Defaults to {AGENCY_AUTHORITY_MAP_FILE.name} "
                          "next to this script. Agencies absent from the map are "
                          "skipped.")
+    ap.add_argument("--no-justificativa", action="store_true",
+                    help="Pass a never-matching --prof-regex-justificativa, so "
+                         "a \"Justificação\" heading inside an enacted act does "
+                         "not end its articulação.")
+    ap.add_argument("--only", default=None, metavar="GLOB",
+                    help="Convert only the .docx files whose name matches this glob. "
+                         "skipped_report.txt then covers only those files.")
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -689,7 +711,8 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     pattern = "**/*.docx" if args.recursive else "*.docx"
-    docx_files = sorted(p for p in args.input_dir.glob(pattern) if p.is_file())
+    docx_files = sorted(p for p in args.input_dir.glob(pattern) if p.is_file()
+                        and (args.only is None or fnmatch.fnmatch(p.name, args.only)))
     if not docx_files:
         print(f"no .docx files found in {args.input_dir}")
         return 0
@@ -697,7 +720,7 @@ def main() -> int:
     outcomes: list[Outcome] = []
     for docx in docx_files:
         o = process_file(docx, args.output_dir, jar, args.dry_run, args.linker,
-                         agency_map)
+                         agency_map, args.no_justificativa)
         outcomes.append(o)
         tag = {"converted": "OK  ", "skipped": "SKIP", "failed": "FAIL"}[o.status]
         extra = ""
