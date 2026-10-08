@@ -389,25 +389,28 @@ object LexmlRenderer {
   }
 
   /** Render an anexo body (paragraphs / tables / OL / images) as a sequence
-   *  of LexML block elements suitable for <PartePrincipal>. Dispositivos
-   *  (when the anexo turned out to be articulated) are routed through the
-   *  normal renderBlocks path. */
+   *  of LexML block elements suitable for <PartePrincipal>, in source order.
+   *  Each run of consecutive Dispositivos (when part of the anexo turned out
+   *  to be articulated) is routed through the normal renderBlocks path at its
+   *  own position. Table ids keep their running index among the
+   *  non-Dispositivo blocks. */
   def renderAnexoBlocks(a: Anexo): NodeSeq = {
     val idBase = a.urnFragment + "_"
-    val (dispositivos, simples) = a.blocks.partition {
-      case _: Dispositivo => true
-      case _ => false
-    }
-    val simplesNodes: Seq[Node] = simples.zipWithIndex.flatMap {
-      case (p: Paragraph, _) => Seq[Node](<p>{ NodeSeq fromSeq p.nodes }</p>)
-      case (Table(elem), i) => Seq[Node](elem % new UnprefixedAttribute("id", idBase + "tab" + (i + 1), Null))
-      case (_: OL, _) => Seq.empty[Node]
+    def simples(b: Block, i: Int): Seq[Node] = b match {
+      case p: Paragraph => Seq[Node](<p>{ NodeSeq fromSeq p.nodes }</p>)
+      case Table(elem) => Seq[Node](elem % new UnprefixedAttribute("id", idBase + "tab" + (i + 1), Null))
+      case _: OL => Seq.empty[Node]
       case _ => Seq.empty[Node]
     }
-    val dispNodes: NodeSeq =
-      if (dispositivos.isEmpty) NodeSeq.Empty
-      else renderBlocks(dispositivos, idBase)
-    NodeSeq.fromSeq(simplesNodes) ++ dispNodes
+    @scala.annotation.tailrec
+    def go(bl: List[Block], nSimples: Int, acc: Vector[Node]): Vector[Node] = bl match {
+      case Nil => acc
+      case (_: Dispositivo) :: _ =>
+        val (run, rest) = bl.span(_.isInstanceOf[Dispositivo])
+        go(rest, nSimples, acc ++ renderBlocks(run, idBase))
+      case b :: rest => go(rest, nSimples + 1, acc ++ simples(b, nSimples))
+    }
+    NodeSeq.fromSeq(go(a.blocks, 0, Vector.empty))
   }
 
   /** True when the anexo body has been articulated (contains Dispositivos)
@@ -447,11 +450,16 @@ object LexmlRenderer {
   /** Articulated annex: <DocumentoArticulado> with optional <ParteInicial>
    *  (Epigrafe for the "ANEXO N" titulo + Preambulo for any leading
    *  paragraphs that did not become Dispositivos) and an <Articulacao>
-   *  containing the Dispositivos. */
+   *  containing the Dispositivos. Paragraphs after the first Dispositivo
+   *  stay in the Articulacao at their position, as renderArticulacao does
+   *  for the main document; they used to be dropped. */
   private def renderAnexoArticulado(a: Anexo): Elem = {
     val idBase = a.urnFragment + "_"
     val (leading, rest) = a.blocks.span(!_.isInstanceOf[Dispositivo])
-    val dispositivos = rest.collect { case d: Dispositivo => d }
+    val corpo = rest.filter {
+      case p: Paragraph => p.text.nonEmpty
+      case _ => true
+    }
 
     val epigrafe: NodeSeq = a.titulo match {
       case Some(p) =>
@@ -474,7 +482,7 @@ object LexmlRenderer {
 
     <DocumentoArticulado>
       { parteInicial }
-      <Articulacao>{ renderBlocks(dispositivos, idBase) }</Articulacao>
+      <Articulacao>{ renderBlocks(corpo, idBase) }</Articulacao>
     </DocumentoArticulado>
   }
 

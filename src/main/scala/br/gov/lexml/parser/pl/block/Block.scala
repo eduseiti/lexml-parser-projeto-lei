@@ -987,6 +987,90 @@ object Block extends Block {
     }))
   }
 
+  /** Closing formulas of treaties and agreements ("EM FÉ DO QUE…", "Feito em…"): never part of the
+   *  last article. Matched against the normalized (lowercase, accentless) text. */
+  val fechoTratadoRe: Regex = """^(em fe do que|em testemunho|feito em|feita em|assinado em|pel[oa] governo|pela republica)""".r
+
+  val tituloArtigoMaxLen = 150
+
+  /** Treaty-style articles put the label alone on a line ("Artigo 34", "ARTIGO 4º"), optionally
+   *  followed by a title line, and then the unlabelled text. The label yields an article plus an
+   *  empty caput, and no later step attaches the text: it stays a sibling of the article (so
+   *  `organizaDispositivos` does not absorb the alíneas/items after it either), can become the
+   *  title of the next article (`identificaTitulos`), and is dropped in articulated annexes.
+   *
+   *  Runs on the flat block list, before `identificaTitulos`. For an article whose caput is empty,
+   *  the following non-empty paragraphs (up to the next dispositivo, an all-uppercase heading or a
+   *  closing formula) become: the article's title, when the first one is short, has no final
+   *  punctuation and is followed by more text or by a sub-article dispositivo; and the caput text,
+   *  joined with spaces. Text inside an Alteracao is not touched. */
+  def anexaTextoArtigoSemCaput(blocks: List[Block]): List[Block] = {
+    def vazio(b: Block): Boolean = b match {
+      case p: Paragraph => p.isEmpty
+      case _ => false
+    }
+
+    def caputVazio(d: Dispositivo): Boolean = d.rotulo match {
+      case RotuloParagrafo(None, _, _) =>
+        d.subDispositivos.isEmpty && !d.fechaAspas && d.notaAlteracao.isEmpty &&
+          d.conteudo.forall { case p: Paragraph => p.text.isEmpty; case _ => false }
+      case _ => false
+    }
+
+    def cabecalho(s: String): Boolean = {
+      val letras = s.filter(_.isLetter)
+      letras.length >= 3 && letras.forall(_.isUpper)
+    }
+
+    def textoDoArtigo(b: Block): Boolean = b match {
+      case p: Paragraph =>
+        !p.isEmpty && p.text.nonEmpty && !p.abreAspas && !p.fechaAspas && p.notaAlteracao.isEmpty &&
+          fechoTratadoRe.findFirstIn(p.text).isEmpty && !cabecalho(p.unormalizedText)
+      case _ => false
+    }
+
+    def subArtigo(b: Block): Boolean = b match {
+      case d: Dispositivo => d.rotulo match {
+        case _: RotuloArtigo => false
+        case RotuloParagrafo(None, _, _) => false
+        case r => !r.isAgregador
+      }
+      case _ => false
+    }
+
+    def pareceTitulo(p: Paragraph): Boolean = {
+      val s = p.unormalizedText
+      s.length <= tituloArtigoMaxLen && !s.lastOption.exists(".;:,?!".contains(_))
+    }
+
+    def junta(pl: List[Paragraph]): Paragraph =
+      pl.head.copy(nodes = pl.tail.foldLeft(pl.head.nodes)((ns, p) => ns ++ Text(" ") ++ p.nodes))
+
+    @tailrec
+    def go(bl: List[Block], acc: List[Block]): List[Block] = bl match {
+      case (art: Dispositivo) :: (cpt: Dispositivo) :: rest
+        if art.rotulo.isInstanceOf[RotuloArtigo] && art.titulo.isEmpty && caputVazio(cpt) =>
+        val (_, rest1) = rest.span(vazio)
+        val (textos, rest2) = rest1.span(textoDoArtigo)
+        val pars = textos.collect { case p: Paragraph => p }
+        if (pars.isEmpty) {
+          go(rest, cpt :: art :: acc)
+        } else {
+          val (titulo, corpo) = pars match {
+            case t :: r if pareceTitulo(t) && (r.nonEmpty || rest2.headOption.exists(subArtigo)) => (Some(t), r)
+            case _ => (None, pars)
+          }
+          val art1 = art.copy(titulo = titulo)
+          val cpt1 = if (corpo.isEmpty) cpt else cpt.copy(conteudo = Some(junta(corpo)))
+          go(rest2, cpt1 :: art1 :: acc)
+        }
+      case b :: rest => go(rest, b :: acc)
+      case Nil => acc.reverse
+    }
+
+    go(blocks, Nil)
+  }
+
   def identificaTitulos(blocks: List[Block], nivel: Int = 0): List[Block] =
     blocks.map({
       case b: Dispositivo => b.replaceChildren(identificaTitulos(b.children, nivel + 1))
