@@ -125,8 +125,16 @@ object rotuloParser {
 		lazy val paragrafoUnico: Parser[RotuloParagrafo] = "paragrafo unico." ^^^ RotuloParagrafo(Some(1), None, true)
 		lazy val paragrafo: Parser[RotuloParagrafo] = paragrafoUnico | paragrafo2 | paragrafo1
 
-		lazy val inciso: Parser[RotuloInciso] =
-			(numeroRomano ~ opt(complemento)) <~ (' ' ?) <~ not(')') <~ (hyphenOrSimilar <~ rep(' ')) ^^ RotuloInciso
+		/** A roman numeral split by a stray space, as in "V I - texto" (RIR/2018, art. 677, VI). */
+		lazy val numeroRomanoEspacado: Parser[Int] =
+			("[ivx]+ [ivx]+".r ^? ({ case s if romanOrString(s.replace(" ", "")).isRight => s.replace(" ", "") },
+				s => s"'$s' não é número romano")) ^^ (s => romanOrString(s).toOption.get)
+
+		// opt('.') accepts a stray dot after the complement, as in "III-A. - texto" (Lei 6.766, art. 4)
+		def incisoNumerado(num: Parser[Int]): Parser[RotuloInciso] =
+			(num ~ opt(complemento)) <~ opt('.') <~ (' ' ?) <~ not(')') <~ (hyphenOrSimilar <~ rep(' ')) ^^ RotuloInciso
+
+		lazy val inciso: Parser[RotuloInciso] = incisoNumerado(numeroRomano) | incisoNumerado(numeroRomanoEspacado)
 
 		lazy val alinea: Parser[RotuloAlinea] = {
 			lazy val pnum: Parser[Int] = ("[a-z]+" r) ^^ (1 + complementoToInteger(_)) | ("\\d+" r) ^^ (Integer.parseInt(_))
@@ -172,8 +180,22 @@ object rotuloParser {
 			}
 		}
 
+		/** Words accepted as a non-numeric LIVRO identification ("LIVRO PRIMEIRO",
+		 * "LIVRO COMPLEMENTAR"). Any other word is ordinary text that merely starts
+		 * with "livro", such as the RIR sub-headings "Livro diário" and "Livro de
+		 * Apuração do Lucro Real", and must not open a LIVRO. */
+		lazy val livroTextual : Set[String] = Set(
+			"primeiro", "segundo", "terceiro", "quarto", "quinto", "sexto", "setimo",
+			"oitavo", "nono", "decimo", "unico", "complementar", "preliminar", "geral",
+			"especial", "final")
+
+		/** A roman numeral glued to the first word of the name ("LIVRO IIITRIBUTAÇÃO",
+		 * RIR/1999), kept as a textual LIVRO as before. */
+		lazy val livroRomanoColado : Regex = "[ivxl]+[a-z]{4,}".r
+
 		lazy val livro : Parser[RotuloLivro] = {
-			("livro " ~> ("\\w+"r)) ~ opt(complemento) ^^ {case ~(num,cmp) =>
+			("livro " ~> ("\\w+".r ^? ({ case w if romanOrString(w).isRight || livroTextual(w) || livroRomanoColado.matches(w) => w },
+				w => s"'livro $w' não é rótulo de livro"))) ~ opt(complemento) ^^ {case ~(num,cmp) =>
 				val numOrText = romanOrString(num) match {
 					case Left(s) => Left(s.toUpperCase)
 					case r => r
@@ -183,9 +205,10 @@ object rotuloParser {
 		}
 
 		lazy val agregador : Parser[Rotulo] = {
+			// no "livro" here: `livro` (tried first in algumRotulo) covers every LIVRO form, and
+			// numeroRomano would otherwise read "livro diario" as LIVRO DI (501) + "ario"
 			lazy val tipo : Parser[(Int,Option[Int],Boolean) => Rotulo] = (
-				  "livro" ^^^ ((n : Int, c : Option[Int],un : Boolean) => RotuloLivro(Right(n),c,un))
-				| "titulo" ^^^ RotuloTitulo
+				  "titulo" ^^^ RotuloTitulo
 				| "subtitulo" ^^^ RotuloSubTitulo
 				| "capitulo" ^^^ RotuloCapitulo
 				| "subcapitulo" ^^^ RotuloCapitulo
